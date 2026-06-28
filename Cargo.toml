@@ -1,10 +1,10 @@
 [package]
 name = "gap-sys"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Rust bindings to GAP - Groups, Algorithms, Programming - a System for Computational Discrete Algebra"
 homepage = "https://www.gap-system.org/"
-repository = "https://github.com/symbolica-ai/gap-sys"
+repository = "https://github.com/georgemorgan/gap-sys"
 readme = "README.md"
 keywords = ["math", "algebra", "groups", "gap", "bindings"]
 categories = ["mathematics", "algorithms"]
