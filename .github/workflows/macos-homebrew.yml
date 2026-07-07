@@ -13,7 +13,7 @@ jobs:
     name: macOS Homebrew GAP
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install GAP from Homebrew
         run: brew install gap-system/gap/gap
@@ -22,7 +22,7 @@ jobs:
         run: |
           gap --version
           gap --print-gaproot
-          find "$(gap --print-gaproot)" -maxdepth 3 \( -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap*.dylib' \)
+          find "$(brew --prefix gap-system/gap/gap)" -maxdepth 3 \( -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap*.dylib' \)
 
       - name: Build
         run: cargo check

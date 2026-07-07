@@ -42,7 +42,7 @@ jobs:
           curl -L -o gap-core.tar.gz "https://github.com/gap-system/gap/releases/download/v${GAP_VERSION}/gap-${GAP_VERSION}-core.tar.gz"
           tar -xzf gap-core.tar.gz
           cd "gap-${GAP_VERSION}"
-          ./configure --with-gmp=system
+          CPPFLAGS="-D_GNU_SOURCE" ./configure --with-gmp=system
           make -j2
 
       - name: Configure GAP environment
@@ -54,14 +54,15 @@ jobs:
           GAP_ROOT_WIN="$(cygpath -w "${GAP_ROOT}")"
           GAP_LIB_DIR_WIN="$(cygpath -w "${GAP_LIB_DIR}")"
           {
-            echo "GAP_SYS_ROOT=${GAP_ROOT_WIN}"
-            echo "GAP_SYS_INCLUDE_DIRS=${GAP_ROOT_WIN}\\src;${GAP_ROOT_WIN}\\build"
-            echo "GAP_SYS_LIB_DIRS=${GAP_LIB_DIR_WIN}"
             echo "LIBCLANG_PATH=C:\\msys64\\ucrt64\\bin"
           } >> "$GITHUB_ENV"
+          echo "${GAP_ROOT_WIN}" >> "$GITHUB_PATH"
           echo "${GAP_LIB_DIR_WIN}" >> "$GITHUB_PATH"
-          "${GAP_ROOT}/gap" --version
-          "${GAP_ROOT}/gap" --print-gaproot
+
+      - name: Show GAP installation
+        run: |
+          gap --version
+          gap --print-gaproot
 
       - name: Build
         run: cargo check

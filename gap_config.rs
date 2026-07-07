@@ -48,8 +48,7 @@ pub fn discover_gap_config(env: &DiscoveryEnv) -> Result<GapConfig, String> {
         .and_then(nonempty_path)
         .map(Ok)
         .unwrap_or_else(|| query_gap_root(env))?;
-
-    validate_gap_root(&root)?;
+    let root = resolve_gap_root(&root)?;
 
     let include_dirs = match env.include_dirs.as_deref() {
         Some(paths) => parse_path_list(paths),
@@ -151,15 +150,32 @@ fn query_gap_root(env: &DiscoveryEnv) -> Result<PathBuf, String> {
     }
 }
 
-fn validate_gap_root(root: &Path) -> Result<(), String> {
-    if root.join("lib").join("init.g").is_file() {
-        Ok(())
-    } else {
-        Err(format!(
-            "GAP root `{}` does not contain `lib/init.g`. Set {GAP_SYS_ROOT} to a valid GAP root.",
-            root.display()
-        ))
+fn resolve_gap_root(root: &Path) -> Result<PathBuf, String> {
+    let candidates = gap_root_candidates(root);
+    for candidate in &candidates {
+        if candidate.join("lib").join("init.g").is_file() {
+            return Ok(candidate.clone());
+        }
     }
+
+    Err(format!(
+        "GAP root `{}` does not contain `lib/init.g`. Tried: {}. Set {GAP_SYS_ROOT} to a valid GAP root.",
+        root.display(),
+        display_paths(&candidates)
+    ))
+}
+
+fn gap_root_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    push_unique(&mut candidates, root.to_path_buf());
+
+    for base in root.ancestors().take(4) {
+        push_unique(&mut candidates, base.join("libexec"));
+        push_unique(&mut candidates, base.join("share").join("gap"));
+        push_unique(&mut candidates, base.join("lib").join("gap"));
+    }
+
+    candidates
 }
 
 fn infer_include_dirs(root: &Path) -> Vec<PathBuf> {
@@ -202,6 +218,7 @@ fn infer_lib_dirs(root: &Path) -> Vec<PathBuf> {
 
     if let Some(parent) = root.parent() {
         push_lib_candidate(&mut dirs, parent.to_path_buf());
+        push_lib_candidates_under(&mut dirs, parent.join("lib"));
 
         if let Some(prefix) = parent.parent() {
             push_lib_candidates_under(&mut dirs, prefix.join("lib"));
@@ -432,6 +449,48 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.include_dirs, vec![include]);
+        assert_eq!(config.lib_dirs, vec![lib]);
+    }
+
+    #[test]
+    fn resolves_homebrew_package_root_to_libexec_root() {
+        let cellar = temp_root("homebrew-libexec");
+        let printed_root = cellar.join("lib/gap");
+        let actual_root = cellar.join("libexec");
+        write_file(printed_root.join("pkg/README"));
+        write_file(actual_root.join("lib/init.g"));
+        write_file(actual_root.join("src/libgap-api.h"));
+        write_file(actual_root.join("src/gap_all.h"));
+        write_file(actual_root.join("build/config.h"));
+        write_file(actual_root.join("libgap.dylib"));
+
+        let config = discover_gap_config(&DiscoveryEnv {
+            root: Some(printed_root.into_os_string()),
+            ..DiscoveryEnv::default()
+        })
+        .unwrap();
+
+        assert_eq!(config.root, actual_root);
+        assert_eq!(config.header_layout, HeaderLayout::Direct);
+    }
+
+    #[test]
+    fn finds_libgap_in_sibling_lib_dir() {
+        let cellar = temp_root("homebrew-sibling-lib");
+        let root = cellar.join("libexec");
+        let lib = cellar.join("lib");
+        write_file(root.join("lib/init.g"));
+        write_file(root.join("src/libgap-api.h"));
+        write_file(root.join("src/gap_all.h"));
+        write_file(root.join("build/config.h"));
+        write_file(lib.join("libgap.dylib"));
+
+        let config = discover_gap_config(&DiscoveryEnv {
+            root: Some(root.into_os_string()),
+            ..DiscoveryEnv::default()
+        })
+        .unwrap();
+
         assert_eq!(config.lib_dirs, vec![lib]);
     }
 
