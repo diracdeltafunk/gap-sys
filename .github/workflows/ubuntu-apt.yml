@@ -22,9 +22,8 @@ jobs:
 
       - name: Show GAP installation
         run: |
-          gap --version
-          gap --print-gaproot
-          find /usr/include /usr/lib -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap.so*'
+          gap -q -c 'Print(GAPInfo.Version, "\n"); for p in GAPInfo.RootPaths do if IsExistingFile(Concatenation(p,"lib/init.g")) then Print(p,"\n"); fi; od; QUIT;'
+          find /usr/include /usr/lib \( -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap.so*' \)
 
       - name: Build
         run: cargo check

@@ -1,12 +1,13 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub const GAP_SYS_ROOT: &str = "GAP_SYS_ROOT";
 pub const GAP_SYS_GAP_BIN: &str = "GAP_SYS_GAP_BIN";
 pub const GAP_SYS_INCLUDE_DIRS: &str = "GAP_SYS_INCLUDE_DIRS";
 pub const GAP_SYS_LIB_DIRS: &str = "GAP_SYS_LIB_DIRS";
+const GAP_ROOT_QUERY: &str = "for p in GAPInfo.RootPaths do if IsExistingFile(Concatenation(p,\"lib/init.g\")) then Print(p,\"\\n\"); fi; od; QUIT;";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeaderLayout {
@@ -118,36 +119,105 @@ fn query_gap_root(env: &DiscoveryEnv) -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("gap"));
 
-    let output = Command::new(&gap_bin).arg("--print-gaproot").output();
-    match output {
+    match run_gap_command(&gap_bin, ["--print-gaproot"]) {
         Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let root = stdout.trim();
-            if root.is_empty() {
-                Err(format!(
-                    "`{} --print-gaproot` returned an empty GAP root. Set {GAP_SYS_ROOT}.",
-                    gap_bin.display()
-                ))
-            } else {
-                Ok(PathBuf::from(root))
+            if let Some(root) = parse_gap_root_stdout(&output.stdout) {
+                return Ok(root);
             }
         }
+        Ok(_) => {}
+        Err(err) if explicit_gap_bin => {
+            return Err(format!(
+                "Could not run `{}`: {err}. Set {GAP_SYS_ROOT}.",
+                gap_bin.display()
+            ));
+        }
+        Err(_) => {
+            return Err(format!(
+                "Could not run `gap --print-gaproot`. Set {GAP_SYS_ROOT} or {GAP_SYS_GAP_BIN}."
+            ));
+        }
+    }
+
+    match run_gap_command(&gap_bin, ["-q", "-c", GAP_ROOT_QUERY]) {
+        Ok(output) if output.status.success() => {
+            parse_gap_root_stdout(&output.stdout).ok_or_else(|| {
+                format!(
+                    "`{} -q -c <gap-root-query>` did not print a usable GAP root. Set {GAP_SYS_ROOT}.",
+                    gap_bin.display()
+                )
+            })
+        }
         Ok(output) if explicit_gap_bin => Err(format!(
-            "`{} --print-gaproot` failed with status {}. Set {GAP_SYS_ROOT}.",
+            "`{} -q -c <gap-root-query>` failed with status {}. Set {GAP_SYS_ROOT}.",
             gap_bin.display(),
             output.status
         )),
         Ok(_) => Err(format!(
-            "Could not discover GAP root with `gap --print-gaproot`. Set {GAP_SYS_ROOT}."
+            "Could not discover GAP root with `gap --print-gaproot` or a GAPInfo.RootPaths query. Set {GAP_SYS_ROOT}."
         )),
         Err(err) if explicit_gap_bin => Err(format!(
             "Could not run `{}`: {err}. Set {GAP_SYS_ROOT}.",
             gap_bin.display()
         )),
         Err(_) => Err(format!(
-            "Could not run `gap --print-gaproot`. Set {GAP_SYS_ROOT} or {GAP_SYS_GAP_BIN}."
+            "Could not run GAP root discovery commands. Set {GAP_SYS_ROOT} or {GAP_SYS_GAP_BIN}."
         )),
     }
+}
+
+fn run_gap_command<const N: usize>(
+    gap_bin: &Path,
+    args: [&str; N],
+) -> std::io::Result<std::process::Output> {
+    Command::new(gap_bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+}
+
+fn parse_gap_root_stdout(stdout: &[u8]) -> Option<PathBuf> {
+    let stdout = String::from_utf8_lossy(stdout);
+    let mut existing_dir = None;
+
+    for line in stdout.lines() {
+        let Some(path) = parse_gap_root_line(line) else {
+            continue;
+        };
+
+        if path.join("lib").join("init.g").is_file() {
+            return Some(path);
+        }
+
+        if existing_dir.is_none() && path.is_dir() {
+            existing_dir = Some(path);
+        }
+    }
+
+    existing_dir
+}
+
+fn parse_gap_root_line(line: &str) -> Option<PathBuf> {
+    let line = line.trim();
+    let line = line.strip_prefix("gap>").unwrap_or(line).trim();
+
+    if line.is_empty() || !is_plausible_path(line) {
+        return None;
+    }
+
+    Some(PathBuf::from(line))
+}
+
+fn is_plausible_path(path: &str) -> bool {
+    path.starts_with('/')
+        || path.starts_with('\\')
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path
+            .as_bytes()
+            .get(1)
+            .map(|byte| *byte == b':')
+            .unwrap_or(false)
 }
 
 fn resolve_gap_root(root: &Path) -> Result<PathBuf, String> {
@@ -492,6 +562,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.lib_dirs, vec![lib]);
+    }
+
+    #[test]
+    fn parses_plain_gap_root_output() {
+        let root = temp_root("plain-gaproot-output");
+        write_file(root.join("lib/init.g"));
+
+        assert_eq!(
+            parse_gap_root_stdout(root.to_string_lossy().as_bytes()),
+            Some(root)
+        );
+    }
+
+    #[test]
+    fn ignores_banner_output_when_parsing_gap_root() {
+        let root = temp_root("banner-gaproot-output");
+        write_file(root.join("lib/init.g"));
+        let output = format!(
+            "Unrecognised command line option: --print-gaproot\n\
+             GAP 4.11.1 startup banner\n\
+             gap> {}\n",
+            root.display()
+        );
+
+        assert_eq!(parse_gap_root_stdout(output.as_bytes()), Some(root));
     }
 
     #[test]

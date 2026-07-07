@@ -1,0 +1,63 @@
+name: Windows WSL GAP
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  WSL_DISTRO: gap-sys-ubuntu-22.04
+  WSL_ROOTFS_URL: https://cloud-images.ubuntu.com/wsl/releases/22.04/current/ubuntu-jammy-wsl-amd64-wsl.rootfs.tar.gz
+
+jobs:
+  windows-wsl-apt:
+    name: Windows WSL Ubuntu apt GAP
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ubuntu in WSL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $rootfs = Join-Path $env:RUNNER_TEMP "ubuntu-jammy-wsl.rootfs.tar.gz"
+          $installDir = Join-Path $env:RUNNER_TEMP "wsl-ubuntu"
+          Invoke-WebRequest -Uri $env:WSL_ROOTFS_URL -OutFile $rootfs
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          wsl --import $env:WSL_DISTRO $installDir $rootfs --version 1
+          wsl -d $env:WSL_DISTRO --exec uname -a
+
+      - name: Install GAP and Rust in WSL
+        shell: pwsh
+        run: |
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential cargo clang gap gap-dev libclang-dev libgap-dev pkg-config rustc"
+
+      - name: Show GAP installation in WSL
+        shell: pwsh
+        run: |
+          $script = @'
+          set -euxo pipefail
+          gap -q -c 'Print(GAPInfo.Version, "\n"); for p in GAPInfo.RootPaths do if IsExistingFile(Concatenation(p,"lib/init.g")) then Print(p,"\n"); fi; od; QUIT;'
+          find /usr/include /usr/lib \( -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap.so*' \)
+          '@
+          wsl -d $env:WSL_DISTRO --exec bash -lc $script
+
+      - name: Build in WSL
+        shell: pwsh
+        run: |
+          $repo = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$repo'; cargo check"
+
+      - name: Test in WSL
+        shell: pwsh
+        run: |
+          $repo = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$repo'; cargo test"
+
+      - name: GAP smoke test in WSL
+        shell: pwsh
+        run: |
+          $repo = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$repo'; cargo test test_smoke_one_plus_one -- --ignored --test-threads=1"

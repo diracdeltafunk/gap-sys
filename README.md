@@ -4,7 +4,7 @@ This crate contains bindings to GAP - Groups, Algorithms, Programming - a System
 
 ## GAP discovery
 
-`gap-sys` tries to discover a local GAP installation at build time. By default it runs `gap --print-gaproot` using `gap` from `PATH`, then infers GAP's header and library directories from that root.
+`gap-sys` tries to discover a local GAP installation at build time. By default it runs `gap --print-gaproot` using `gap` from `PATH`; for older GAP versions that do not support that option, it falls back to querying `GAPInfo.RootPaths` for a root containing `lib/init.g`. It then infers GAP's header and library directories from that root.
 
 The build supports both common header layouts:
 
