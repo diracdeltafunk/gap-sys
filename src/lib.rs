@@ -14,7 +14,6 @@ use std::ptr;
 pub struct Gap {
     print_fn: Obj,
     input_stream: Obj,
-    output_stream: TypOutputFile,
     output_str_obj: Obj,
     output_stream_handle: Obj,
 }
@@ -22,7 +21,7 @@ pub struct Gap {
 impl Drop for Gap {
     fn drop(&mut self) {
         unsafe {
-            CloseOutput(&mut self.output_stream);
+            SYSGAP_CloseOutput();
         }
     }
 }
@@ -118,14 +117,13 @@ impl Gap {
             obj
         };
 
-        let (output_stream, output_str_obj, output_stream_handle) = unsafe {
+        let (output_str_obj, output_stream_handle) = unsafe {
             let output_str_obj = NEW_STRING(0);
             let handle_obj = DoOperation2Args(output_text_str_operation, output_str_obj, GAP_True);
-            let mut output: TypOutputFile = std::mem::zeroed();
-            if OpenOutputStream(&mut output, handle_obj) != 1 {
+            if SYSGAP_OpenOutputStream(handle_obj) != 1 {
                 return Err(anyhow!("Unable to open GAP output stream"));
             }
-            (output, output_str_obj, handle_obj)
+            (output_str_obj, handle_obj)
         };
 
         let print_fn = unsafe {
@@ -145,7 +143,6 @@ impl Gap {
         Ok(Gap {
             print_fn,
             input_stream,
-            output_stream,
             output_str_obj,
             output_stream_handle,
         })
@@ -176,7 +173,7 @@ impl Gap {
 
     pub fn elem_string(&mut self, element: &GapElement) -> String {
         unsafe {
-            GAP_CallFunc2Args(self.print_fn, self.output_stream_handle, element.obj);
+            SYSGAP_CallFunc2Args(self.print_fn, self.output_stream_handle, element.obj);
         }
 
         let cstr: &CStr = unsafe { CStr::from_ptr(GAP_CSTR_STRING(self.output_str_obj)) };
@@ -232,7 +229,7 @@ static mut OBJ_REFS: *mut Vec<GapElement> = ptr::null_mut();
 
 unsafe extern "C" fn mark_bag() {
     for o in &*OBJ_REFS {
-        GAP_MarkBag(o.obj);
+        SYSGAP_MarkBag(o.obj);
     }
 }
 

@@ -106,6 +106,39 @@ static inline int SYSGAP_Enter() {{
 static inline void SYSGAP_Leave() {{
     GAP_Leave();
 }}
+
+#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 10000
+static TypOutputFile SYSGAP_OUTPUT_STREAM = {{ 0 }};
+#endif
+
+static inline UInt SYSGAP_OpenOutputStream(Obj stream) {{
+#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 10000
+    return OpenOutputStream(&SYSGAP_OUTPUT_STREAM, stream);
+#else
+    return OpenOutputStream(stream);
+#endif
+}}
+
+static inline UInt SYSGAP_CloseOutput(void) {{
+#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 10000
+    return CloseOutput(&SYSGAP_OUTPUT_STREAM);
+#else
+    return CloseOutput();
+#endif
+}}
+
+static inline Obj SYSGAP_CallFunc2Args(Obj func, Obj a1, Obj a2) {{
+    Obj args[2] = {{ a1, a2 }};
+    return GAP_CallFuncArray(func, 2, args);
+}}
+
+static inline void SYSGAP_MarkBag(Obj obj) {{
+#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 10000
+    GAP_MarkBag(obj);
+#else
+    MarkBag(obj);
+#endif
+}}
 "
     )
 }

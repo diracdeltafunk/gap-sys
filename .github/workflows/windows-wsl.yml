@@ -37,12 +37,9 @@ jobs:
       - name: Show GAP installation in WSL
         shell: pwsh
         run: |
-          $script = @'
-          set -euxo pipefail
-          gap -q -c 'Print(GAPInfo.Version, "\n"); for p in GAPInfo.RootPaths do if IsExistingFile(Concatenation(p,"lib/init.g")) then Print(p,"\n"); fi; od; QUIT;'
-          find /usr/include /usr/lib \( -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap.so*' \)
-          '@
-          wsl -d $env:WSL_DISTRO --exec bash -lc $script
+          $gapQuery = 'Print(GAPInfo.Version, "\n"); for p in GAPInfo.RootPaths do if IsExistingFile(Concatenation(p,"lib/init.g")) then Print(p,"\n"); fi; od; QUIT;'
+          wsl -d $env:WSL_DISTRO --exec gap -q -c $gapQuery
+          wsl -d $env:WSL_DISTRO --exec find /usr/include /usr/lib "(" -name "libgap-api.h" -o -name "gap_all.h" -o -name "libgap.so*" ")"
 
       - name: Build in WSL
         shell: pwsh
