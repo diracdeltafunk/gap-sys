@@ -5,9 +5,10 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-use anyhow::Result;
-use std::ffi::{c_int, CStr, CString};
+use anyhow::{anyhow, Context, Result};
+use std::ffi::{c_char, c_int, CStr, CString};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 pub struct Gap {
@@ -64,26 +65,39 @@ impl From<&str> for GapElement {
 
 impl Gap {
     pub fn init() -> Gap {
-        let arg1 = CString::new("gap").unwrap();
-        let arg2 = CString::new("-l").unwrap();
-        let arg3 = CString::new("/usr/local/gap/share/gap").unwrap();
-        let arg4 = CString::new("-q").unwrap();
-        let arg5 = CString::new("-E").unwrap();
-        let arg6 = CString::new("--nointeract").unwrap();
-        let arg7 = CString::new("-x").unwrap();
-        let arg8 = CString::new("4096").unwrap();
+        Self::try_init().expect("Unable to initialize GAP")
+    }
 
-        let mut c_args = vec![
-            arg1.into_raw(),
-            arg2.into_raw(),
-            arg3.into_raw(),
-            arg4.into_raw(),
-            arg5.into_raw(),
-            arg6.into_raw(),
-            arg7.into_raw(),
-            arg8.into_raw(),
-            ptr::null_mut(),
+    pub fn try_init() -> Result<Gap> {
+        let root = default_gap_root();
+        Self::try_init_with_root(root)
+    }
+
+    pub fn init_with_root<P: AsRef<Path>>(root: P) -> Gap {
+        Self::try_init_with_root(root).expect("Unable to initialize GAP")
+    }
+
+    pub fn try_init_with_root<P: AsRef<Path>>(root: P) -> Result<Gap> {
+        let root = root.as_ref();
+        validate_gap_root(root)?;
+
+        let root_arg = root.to_string_lossy().into_owned();
+        let args = vec![
+            CString::new("gap").context("Unable to build GAP argv[0]")?,
+            CString::new("-l").context("Unable to build GAP -l argument")?,
+            CString::new(root_arg).context("GAP root contains an interior NUL byte")?,
+            CString::new("-q").context("Unable to build GAP -q argument")?,
+            CString::new("-E").context("Unable to build GAP -E argument")?,
+            CString::new("--nointeract").context("Unable to build GAP --nointeract argument")?,
+            CString::new("-x").context("Unable to build GAP -x argument")?,
+            CString::new("4096").context("Unable to build GAP line width argument")?,
         ];
+
+        let mut c_args: Vec<*mut c_char> = args
+            .iter()
+            .map(|arg| arg.as_ptr() as *mut c_char)
+            .chain(std::iter::once(ptr::null_mut()))
+            .collect();
 
         unsafe {
             OBJ_REFS = Box::into_raw(Box::default());
@@ -108,7 +122,9 @@ impl Gap {
             let output_str_obj = NEW_STRING(0);
             let handle_obj = DoOperation2Args(output_text_str_operation, output_str_obj, GAP_True);
             let mut output: TypOutputFile = std::mem::zeroed();
-            assert_eq!(OpenOutputStream(&mut output, handle_obj), 1);
+            if OpenOutputStream(&mut output, handle_obj) != 1 {
+                return Err(anyhow!("Unable to open GAP output stream"));
+            }
             (output, output_str_obj, handle_obj)
         };
 
@@ -126,13 +142,13 @@ impl Gap {
             obj
         };
 
-        Gap {
+        Ok(Gap {
             print_fn,
             input_stream,
             output_stream,
             output_str_obj,
             output_stream_handle,
-        }
+        })
     }
 
     pub fn eval(&self, cmd: &str) -> Result<GapElement> {
@@ -193,6 +209,23 @@ impl Gap {
     }
 }
 
+fn default_gap_root() -> PathBuf {
+    std::env::var_os("GAP_SYS_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("GAP_SYS_GAP_ROOT")))
+}
+
+fn validate_gap_root(root: &Path) -> Result<()> {
+    if root.join("lib").join("init.g").is_file() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "GAP root `{}` does not contain `lib/init.g`; set GAP_SYS_ROOT to a valid GAP root",
+            root.display()
+        ))
+    }
+}
+
 // Garbage collector interface
 
 static mut OBJ_REFS: *mut Vec<GapElement> = ptr::null_mut();
@@ -247,5 +280,13 @@ mod tests {
         let hello = gap.eval("\"Hello, world!\";").unwrap();
         let string = gap.elem_string(&hello);
         assert_eq!(string, "Hello, world!");
+    }
+
+    #[ignore]
+    #[test]
+    fn test_smoke_one_plus_one() {
+        let mut gap = Gap::init();
+        let value = gap.eval("1+1;").unwrap();
+        assert_eq!(gap.elem_string(&value), "2");
     }
 }
