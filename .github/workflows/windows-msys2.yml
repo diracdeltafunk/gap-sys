@@ -1,0 +1,73 @@
+name: Windows MSYS2 GAP
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  GAP_VERSION: 4.16.0
+
+jobs:
+  windows-msys2-source:
+    name: Windows MSYS2 source GAP
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            curl
+            tar
+          pacboy: >-
+            clang:p
+            gcc:p
+            gmp:p
+            readline:p
+            rust:p
+            zlib:p
+
+      - name: Build GAP from source
+        run: |
+          set -euxo pipefail
+          curl -L -o gap-core.tar.gz "https://github.com/gap-system/gap/releases/download/v${GAP_VERSION}/gap-${GAP_VERSION}-core.tar.gz"
+          tar -xzf gap-core.tar.gz
+          cd "gap-${GAP_VERSION}"
+          ./configure --with-gmp=system
+          make -j2
+
+      - name: Configure GAP environment
+        run: |
+          set -euxo pipefail
+          WORKSPACE="$(cygpath -u "${GITHUB_WORKSPACE}")"
+          GAP_ROOT="${WORKSPACE}/gap-${GAP_VERSION}"
+          GAP_LIB_DIR="$(find "${GAP_ROOT}" -type f \( -name 'libgap.dll.a' -o -name 'libgap.a' -o -name 'gap.dll' \) -print -quit | xargs dirname)"
+          GAP_ROOT_WIN="$(cygpath -w "${GAP_ROOT}")"
+          GAP_LIB_DIR_WIN="$(cygpath -w "${GAP_LIB_DIR}")"
+          {
+            echo "GAP_SYS_ROOT=${GAP_ROOT_WIN}"
+            echo "GAP_SYS_INCLUDE_DIRS=${GAP_ROOT_WIN}\\src;${GAP_ROOT_WIN}\\build"
+            echo "GAP_SYS_LIB_DIRS=${GAP_LIB_DIR_WIN}"
+            echo "LIBCLANG_PATH=C:\\msys64\\ucrt64\\bin"
+          } >> "$GITHUB_ENV"
+          echo "${GAP_LIB_DIR_WIN}" >> "$GITHUB_PATH"
+          "${GAP_ROOT}/gap" --version
+          "${GAP_ROOT}/gap" --print-gaproot
+
+      - name: Build
+        run: cargo check
+
+      - name: Test
+        run: cargo test
+
+      - name: GAP smoke test
+        run: cargo test test_smoke_one_plus_one -- --ignored --test-threads=1

@@ -198,17 +198,33 @@ fn infer_lib_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     push_lib_candidate(&mut dirs, root.to_path_buf());
-    push_lib_candidate(&mut dirs, root.join("lib"));
+    push_lib_candidates_under(&mut dirs, root.join("lib"));
 
     if let Some(parent) = root.parent() {
         push_lib_candidate(&mut dirs, parent.to_path_buf());
 
         if let Some(prefix) = parent.parent() {
-            push_lib_candidate(&mut dirs, prefix.join("lib"));
+            push_lib_candidates_under(&mut dirs, prefix.join("lib"));
+            push_lib_candidates_under(&mut dirs, prefix.join("lib64"));
         }
     }
 
     dirs
+}
+
+fn push_lib_candidates_under(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    push_lib_candidate(dirs, dir.clone());
+
+    let Ok(entries) = dir.read_dir() else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            push_lib_candidate(dirs, path);
+        }
+    }
 }
 
 fn push_lib_candidate(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
@@ -396,6 +412,27 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("Could not find libgap"));
+    }
+
+    #[test]
+    fn discovers_multiarch_lib_dir() {
+        let base = temp_root("multiarch-lib");
+        let root = base.join("share/gap");
+        let include = base.join("include");
+        let lib = base.join("lib/x86_64-linux-gnu");
+        write_file(root.join("lib/init.g"));
+        write_file(include.join("gap/libgap-api.h"));
+        write_file(include.join("gap/gap_all.h"));
+        write_file(lib.join("libgap.so"));
+
+        let config = discover_gap_config(&DiscoveryEnv {
+            root: Some(root.into_os_string()),
+            ..DiscoveryEnv::default()
+        })
+        .unwrap();
+
+        assert_eq!(config.include_dirs, vec![include]);
+        assert_eq!(config.lib_dirs, vec![lib]);
     }
 
     #[test]

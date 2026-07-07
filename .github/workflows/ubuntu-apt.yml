@@ -1,0 +1,36 @@
+name: Ubuntu apt GAP
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ubuntu-apt:
+    name: Ubuntu apt GAP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GAP from apt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gap gap-dev libgap-dev
+
+      - name: Show GAP installation
+        run: |
+          gap --version
+          gap --print-gaproot
+          find /usr/include /usr/lib -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap.so*'
+
+      - name: Build
+        run: cargo check
+
+      - name: Test
+        run: cargo test
+
+      - name: GAP smoke test
+        run: cargo test test_smoke_one_plus_one -- --ignored --test-threads=1

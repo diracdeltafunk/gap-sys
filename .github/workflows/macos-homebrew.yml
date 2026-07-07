@@ -1,0 +1,34 @@
+name: macOS Homebrew GAP
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos-homebrew:
+    name: macOS Homebrew GAP
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GAP from Homebrew
+        run: brew install gap
+
+      - name: Show GAP installation
+        run: |
+          gap --version
+          gap --print-gaproot
+          find "$(gap --print-gaproot)" -maxdepth 3 \( -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap*.dylib' \)
+
+      - name: Build
+        run: cargo check
+
+      - name: Test
+        run: cargo test
+
+      - name: GAP smoke test
+        run: cargo test test_smoke_one_plus_one -- --ignored --test-threads=1
