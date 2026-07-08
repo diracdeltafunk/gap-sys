@@ -38,7 +38,7 @@ GAP_SYS_LIB_DIRS=/usr/local/lib \
 cargo build
 ```
 
-At runtime, `Gap::init()` uses `GAP_SYS_ROOT` if it is set, otherwise it uses the GAP root detected at build time. Use `Gap::try_init()` or `Gap::try_init_with_root(...)` for fallible initialization with better diagnostics.
+At runtime, `Gap::init()` uses `GAP_SYS_ROOT` if it is set, otherwise it uses the GAP root detected at build time. Some package managers split GAP across multiple root directories, for example a core root under `lib/gap` and package data under `share/gap`; when `gap-sys` sees that layout, it passes both roots to libgap so packages remain discoverable. Use `Gap::try_init()` or `Gap::try_init_with_root(...)` for fallible initialization with better diagnostics.
 
 #### Example showing how to create a Group
 ```

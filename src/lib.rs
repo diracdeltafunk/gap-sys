@@ -81,7 +81,7 @@ impl Gap {
         let root = root.as_ref();
         validate_gap_root(root)?;
 
-        let root_arg = format!("{};", root.to_string_lossy());
+        let root_arg = gap_root_arg(root);
         let args = vec![
             CString::new("gap").context("Unable to build GAP argv[0]")?,
             CString::new("-l").context("Unable to build GAP -l argument")?,
@@ -220,6 +220,46 @@ fn default_gap_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("GAP_SYS_GAP_ROOT")))
 }
 
+fn gap_root_arg(root: &Path) -> String {
+    let mut roots = Vec::new();
+    push_unique_path(&mut roots, root.to_path_buf());
+
+    for candidate in inferred_runtime_roots(root) {
+        if is_gap_runtime_root(&candidate) {
+            push_unique_path(&mut roots, candidate);
+        }
+    }
+
+    let mut arg = roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(";");
+    arg.push(';');
+    arg
+}
+
+fn inferred_runtime_roots(root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    for base in root.ancestors().take(4) {
+        push_unique_path(&mut roots, base.join("lib").join("gap"));
+        push_unique_path(&mut roots, base.join("share").join("gap"));
+    }
+
+    roots
+}
+
+fn is_gap_runtime_root(root: &Path) -> bool {
+    root.join("lib").join("init.g").is_file() || root.join("pkg").is_dir()
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
 fn validate_gap_root(root: &Path) -> Result<()> {
     if root.join("lib").join("init.g").is_file() {
         Ok(())
@@ -297,8 +337,51 @@ mod tests {
     fn test_smoke_one_plus_one() {
         let mut gap = Gap::init();
         let gapdoc = gap.eval("LoadPackage(\"gapdoc\");").unwrap();
-        assert_eq!(gap.elem_string(&gapdoc), "true");
+        let gapdoc_loaded = gap.elem_string(&gapdoc);
+        if gapdoc_loaded != "true" {
+            let roots = gap.eval("GAPInfo.RootPaths;").unwrap();
+            let root_paths = gap.elem_string(&roots);
+            panic!("unable to load GAP package gapdoc; GAPInfo.RootPaths = {root_paths}");
+        }
         let value = gap.eval("1+1;").unwrap();
         assert_eq!(gap.elem_string(&value), "2");
+    }
+
+    #[test]
+    fn runtime_root_arg_includes_homebrew_split_package_root() {
+        let base = temp_root("homebrew-split-runtime");
+        let root = base.join("lib/gap");
+        let package_root = base.join("share/gap");
+        write_file(root.join("lib/init.g"));
+        write_file(package_root.join("pkg/gapdoc/PackageInfo.g"));
+
+        let arg = gap_root_arg(&root);
+
+        assert!(arg.contains(&format!("{};", root.display())));
+        assert!(arg.contains(&format!("{};", package_root.display())));
+    }
+
+    #[test]
+    fn runtime_root_arg_leaves_unsplit_root_alone() {
+        let root = temp_root("unsplit-runtime");
+        write_file(root.join("lib/init.g"));
+        write_file(root.join("pkg/gapdoc/PackageInfo.g"));
+
+        assert_eq!(gap_root_arg(&root), format!("{};", root.display()));
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("gap-sys-runtime-{name}-{unique}"));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn write_file(path: PathBuf) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
     }
 }
