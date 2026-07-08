@@ -58,6 +58,7 @@ jobs:
         shell: wsl-bash {0}
         run: |
           . "$HOME/.cargo/env"
+          export CARGO_TARGET_DIR=/tmp/gap-sys-target
           timeout --foreground 20m cargo check -vv
 
       - name: Test in WSL
@@ -65,6 +66,7 @@ jobs:
         shell: wsl-bash {0}
         run: |
           . "$HOME/.cargo/env"
+          export CARGO_TARGET_DIR=/tmp/gap-sys-target
           timeout --foreground 20m cargo test -vv
 
       - name: GAP smoke test in WSL
@@ -72,4 +74,5 @@ jobs:
         shell: wsl-bash {0}
         run: |
           . "$HOME/.cargo/env"
+          export CARGO_TARGET_DIR=/tmp/gap-sys-target
           timeout --foreground 8m cargo test -vv test_smoke_one_plus_one -- --ignored --test-threads=1

@@ -103,7 +103,7 @@ impl Gap {
             OBJ_REFS = Box::into_raw(Box::default());
             GAP_ERROR_OCCURRED.store(false, Ordering::SeqCst);
 
-            GAP_Initialize(
+            SYSGAP_Initialize(
                 c_args.len() as c_int - 1,
                 c_args.as_mut_ptr(),
                 Some(mark_bag),

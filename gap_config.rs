@@ -98,7 +98,28 @@ pub fn wrapper_header(layout: &HeaderLayout) -> String {
 // Include all of GAP's headers.
 {includes}
 
-// Wrapper around macros.
+// Wrapper around macros and version-varying libgap APIs.
+#if defined(GAP_CallbackFunc)
+typedef GAP_CallbackFunc SYSGAP_CallbackFunc;
+#else
+typedef void (*SYSGAP_CallbackFunc)(void);
+#endif
+
+static inline void SYSGAP_Initialize(
+    int argc,
+    char ** argv,
+    SYSGAP_CallbackFunc markBagsCallback,
+    SYSGAP_CallbackFunc errorCallback,
+    int handleSignals) {{
+#if defined(GAP_Enter)
+    GAP_Initialize(argc, argv, markBagsCallback, errorCallback, handleSignals);
+#else
+    (void)handleSignals;
+    GAP_Initialize(argc, argv, 0, markBagsCallback, errorCallback);
+#endif
+}}
+
+#if defined(GAP_Enter)
 static inline int SYSGAP_Enter() {{
     return GAP_Enter();
 }}
@@ -106,13 +127,14 @@ static inline int SYSGAP_Enter() {{
 static inline void SYSGAP_Leave() {{
     GAP_Leave();
 }}
+#endif
 
-#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 10000
+#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 8000
 static TypOutputFile SYSGAP_OUTPUT_STREAM = {{ 0 }};
 #endif
 
 static inline UInt SYSGAP_OpenOutputStream(Obj stream) {{
-#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 10000
+#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 8000
     return OpenOutputStream(&SYSGAP_OUTPUT_STREAM, stream);
 #else
     return OpenOutputStream(stream);
@@ -120,7 +142,7 @@ static inline UInt SYSGAP_OpenOutputStream(Obj stream) {{
 }}
 
 static inline UInt SYSGAP_CloseOutput(void) {{
-#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 10000
+#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 8000
     return CloseOutput(&SYSGAP_OUTPUT_STREAM);
 #else
     return CloseOutput();
@@ -128,12 +150,16 @@ static inline UInt SYSGAP_CloseOutput(void) {{
 }}
 
 static inline Obj SYSGAP_CallFunc2Args(Obj func, Obj a1, Obj a2) {{
+#if defined(GAP_Enter)
     Obj args[2] = {{ a1, a2 }};
     return GAP_CallFuncArray(func, 2, args);
+#else
+    return CALL_2ARGS(func, a1, a2);
+#endif
 }}
 
 static inline void SYSGAP_MarkBag(Obj obj) {{
-#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 10000
+#if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 8000
     GAP_MarkBag(obj);
 #else
     MarkBag(obj);
