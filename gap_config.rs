@@ -323,7 +323,7 @@ fn infer_lib_dirs(root: &Path) -> Vec<PathBuf> {
         push_lib_candidate(&mut dirs, parent.to_path_buf());
         push_lib_candidates_under(&mut dirs, parent.join("lib"));
 
-        if let Some(prefix) = parent.parent() {
+        if let Some(prefix) = parent.parent().filter(|prefix| prefix.parent().is_some()) {
             push_lib_candidates_under(&mut dirs, prefix.join("lib"));
             push_lib_candidates_under(&mut dirs, prefix.join("lib64"));
         }

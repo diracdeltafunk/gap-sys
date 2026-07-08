@@ -10,6 +10,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Gap {
     print_fn: Obj,
@@ -100,14 +101,21 @@ impl Gap {
 
         unsafe {
             OBJ_REFS = Box::into_raw(Box::default());
+            GAP_ERROR_OCCURRED.store(false, Ordering::SeqCst);
 
             GAP_Initialize(
                 c_args.len() as c_int - 1,
                 c_args.as_mut_ptr(),
                 Some(mark_bag),
-                None,
+                Some(gap_error_callback),
                 1,
             );
+        }
+
+        if GAP_ERROR_OCCURRED.swap(false, Ordering::SeqCst) {
+            return Err(anyhow!(
+                "GAP reported an error during initialization; check that GAP's root and package directories are complete"
+            ));
         }
 
         let output_text_str_operation = unsafe {
@@ -226,6 +234,11 @@ fn validate_gap_root(root: &Path) -> Result<()> {
 // Garbage collector interface
 
 static mut OBJ_REFS: *mut Vec<GapElement> = ptr::null_mut();
+static GAP_ERROR_OCCURRED: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" fn gap_error_callback() {
+    GAP_ERROR_OCCURRED.store(true, Ordering::SeqCst);
+}
 
 unsafe extern "C" fn mark_bag() {
     for o in &*OBJ_REFS {
@@ -283,6 +296,8 @@ mod tests {
     #[test]
     fn test_smoke_one_plus_one() {
         let mut gap = Gap::init();
+        let gapdoc = gap.eval("LoadPackage(\"gapdoc\");").unwrap();
+        assert_eq!(gap.elem_string(&gapdoc), "true");
         let value = gap.eval("1+1;").unwrap();
         assert_eq!(gap.elem_string(&value), "2");
     }
