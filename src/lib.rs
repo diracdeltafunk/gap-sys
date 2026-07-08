@@ -242,7 +242,7 @@ fn gap_root_arg(root: &Path) -> String {
 fn inferred_runtime_roots(root: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
-    for base in root.ancestors().take(4) {
+    for base in root.ancestors().take(4).filter(|base| base.parent().is_some()) {
         push_unique_path(&mut roots, base.join("lib").join("gap"));
         push_unique_path(&mut roots, base.join("share").join("gap"));
     }
@@ -368,6 +368,15 @@ mod tests {
         write_file(root.join("pkg/gapdoc/PackageInfo.g"));
 
         assert_eq!(gap_root_arg(&root), format!("{};", root.display()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_root_inference_does_not_probe_filesystem_root() {
+        let roots = inferred_runtime_roots(Path::new("/tmp/gap-sys-fake-root"));
+
+        assert!(!roots.contains(&PathBuf::from("/lib/gap")));
+        assert!(!roots.contains(&PathBuf::from("/share/gap")));
     }
 
     fn temp_root(name: &str) -> PathBuf {
