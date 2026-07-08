@@ -44,10 +44,14 @@ jobs:
           wsl -d $env:WSL_DISTRO --exec find /usr/include /usr/lib "(" -name "libgap-api.h" -o -name "gap_all.h" -o -name "libgap.so*" ")"
 
       - name: Copy source into WSL filesystem
+        timeout-minutes: 5
         shell: pwsh
         run: |
-          $workspace = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
-          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; mkdir -p '$env:WSL_REPO'; tar -C '$workspace' --exclude=.git --exclude=target -cf - . | tar -C '$env:WSL_REPO' -xf -; cd '$env:WSL_REPO'; pwd; df -h /tmp; rustc --version; cargo --version; clang --version"
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path $env:RUNNER_TEMP "gap-sys-src.tar"
+          git -C "$env:GITHUB_WORKSPACE" archive --format=tar -o "$archive" HEAD
+          $archiveWsl = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$archive").Trim()
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; rm -rf '$env:WSL_REPO'; mkdir -p '$env:WSL_REPO'; tar -C '$env:WSL_REPO' -xf '$archiveWsl'; cd '$env:WSL_REPO'; pwd; df -h /tmp; rustc --version; cargo --version; clang --version"
 
       - name: Build in WSL
         timeout-minutes: 25
