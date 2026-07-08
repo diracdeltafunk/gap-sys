@@ -27,7 +27,7 @@ impl Drop for Gap {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GapElement {
     pub obj: Obj,
 }
@@ -201,9 +201,124 @@ impl Gap {
         }
     }
 
+    pub fn global(&self, name: &str) -> Result<GapElement> {
+        let raw_ptr = CString::new(name)
+            .context("GAP global variable name contains an interior NUL byte")?
+            .into_raw();
+        let obj = unsafe { GAP_ValueGlobalVariable(raw_ptr) };
+        unsafe {
+            let _ = CString::from_raw(raw_ptr);
+        }
+        check_gap_error("looking up a global variable")?;
+        Ok(GapElement { obj })
+    }
+
+    pub fn call_function(&self, function: &GapElement, args: &[&GapElement]) -> Result<GapElement> {
+        let mut raw_args = args.iter().map(|arg| arg.obj).collect::<Vec<_>>();
+        GAP_ERROR_OCCURRED.store(false, Ordering::SeqCst);
+        let obj = unsafe {
+            GAP_CallFuncArray(function.obj, raw_args.len() as UInt, raw_args.as_mut_ptr())
+        };
+        check_gap_error("calling a GAP function")?;
+        Ok(GapElement { obj })
+    }
+
+    pub fn call_global(&self, name: &str, args: &[&GapElement]) -> Result<GapElement> {
+        let function = self.global(name)?;
+        self.call_function(&function, args)
+    }
+
+    pub fn int(&self, value: isize) -> GapElement {
+        GapElement {
+            obj: unsafe { INTOBJ_INT(value as Int) },
+        }
+    }
+
+    pub fn integer_usize(&self, element: &GapElement) -> Result<usize> {
+        let value = unsafe { Int_ObjInt(element.obj) };
+        if value < 0 {
+            return Err(anyhow!(
+                "GAP integer {value} cannot be represented as usize"
+            ));
+        }
+        Ok(value as usize)
+    }
+
+    pub fn boolean(&self, element: &GapElement) -> Result<bool> {
+        unsafe {
+            if element.obj == GAP_True {
+                Ok(true)
+            } else if element.obj == GAP_False {
+                Ok(false)
+            } else {
+                Err(anyhow!("GAP object is not a boolean"))
+            }
+        }
+    }
+
+    pub fn is_fail(&self, element: &GapElement) -> bool {
+        unsafe { element.obj == GAP_Fail || element.obj == Fail }
+    }
+
+    pub fn list(&self, elements: &[GapElement]) -> GapElement {
+        unsafe {
+            let list = NEW_PLIST(TNUM_T_PLIST as UInt, elements.len() as Int);
+            SET_LEN_PLIST(list, elements.len() as Int);
+            for (idx, element) in elements.iter().enumerate() {
+                SET_ELM_PLIST(list, idx as Int + 1, element.obj);
+            }
+            CHANGED_BAG(list);
+            GapElement { obj: list }
+        }
+    }
+
+    pub fn list_len(&self, list: &GapElement) -> usize {
+        unsafe { LEN_LIST(list.obj) as usize }
+    }
+
+    pub fn permutation_from_zero_based_images(&self, images: &[usize]) -> Result<GapElement> {
+        let source = (1..=images.len())
+            .map(|idx| self.int(idx as isize))
+            .collect::<Vec<_>>();
+        let target = images
+            .iter()
+            .map(|&image| self.int(image as isize + 1))
+            .collect::<Vec<_>>();
+        let source = self.list(&source);
+        let target = self.list(&target);
+        self.alloc(&source);
+        self.alloc(&target);
+        let result = self.call_global("MappingPermListList", &[&source, &target]);
+        self.free(&target);
+        self.free(&source);
+        result
+    }
+
+    pub fn permutation_images_zero_based(
+        &self,
+        permutation: &GapElement,
+        degree: usize,
+    ) -> Result<Vec<usize>> {
+        let on_points = self.global("OnPoints")?;
+        (1..=degree)
+            .map(|point| {
+                let point = self.int(point as isize);
+                let image = self.call_function(&on_points, &[&point, permutation])?;
+                self.integer_usize(&image).and_then(|image| {
+                    image
+                        .checked_sub(1)
+                        .ok_or_else(|| anyhow!("permutation sent a point outside [1..degree]"))
+                })
+            })
+            .collect()
+    }
+
     pub fn free(&self, obj: &GapElement) {
         unsafe {
-            OBJ_REFS.as_mut().unwrap().retain(|x| x.obj != obj.obj);
+            let refs = OBJ_REFS.as_mut().unwrap();
+            if let Some(idx) = refs.iter().position(|x| x.obj == obj.obj) {
+                refs.remove(idx);
+            }
         }
     }
 
@@ -211,6 +326,14 @@ impl Gap {
         unsafe {
             OBJ_REFS.as_mut().unwrap().push(obj.to_owned());
         }
+    }
+}
+
+fn check_gap_error(context: &str) -> Result<()> {
+    if GAP_ERROR_OCCURRED.swap(false, Ordering::SeqCst) {
+        Err(anyhow!("GAP reported an error while {context}"))
+    } else {
+        Ok(())
     }
 }
 
@@ -242,7 +365,11 @@ fn gap_root_arg(root: &Path) -> String {
 fn inferred_runtime_roots(root: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
-    for base in root.ancestors().take(4).filter(|base| base.parent().is_some()) {
+    for base in root
+        .ancestors()
+        .take(4)
+        .filter(|base| base.parent().is_some())
+    {
         push_unique_path(&mut roots, base.join("lib").join("gap"));
         push_unique_path(&mut roots, base.join("share").join("gap"));
     }
