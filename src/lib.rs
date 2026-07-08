@@ -81,7 +81,7 @@ impl Gap {
         let root = root.as_ref();
         validate_gap_root(root)?;
 
-        let root_arg = root.to_string_lossy().into_owned();
+        let root_arg = format!("{};", root.to_string_lossy());
         let args = vec![
             CString::new("gap").context("Unable to build GAP argv[0]")?,
             CString::new("-l").context("Unable to build GAP -l argument")?,
