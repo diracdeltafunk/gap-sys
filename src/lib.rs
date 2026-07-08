@@ -8,9 +8,11 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 use anyhow::{anyhow, Context, Result};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 pub struct Gap {
     print_fn: Obj,
@@ -18,6 +20,8 @@ pub struct Gap {
     output_str_obj: Obj,
     output_stream_handle: Obj,
 }
+
+unsafe impl Send for Gap {}
 
 impl Drop for Gap {
     fn drop(&mut self) {
@@ -30,6 +34,15 @@ impl Drop for Gap {
 #[derive(Clone, Debug)]
 pub struct GapElement {
     pub obj: Obj,
+}
+
+#[derive(Debug)]
+pub struct GapObj {
+    element: GapElement,
+}
+
+pub struct GlobalGapGuard {
+    guard: MutexGuard<'static, Gap>,
 }
 
 impl fmt::Display for GapElement {
@@ -61,6 +74,101 @@ impl From<&str> for GapElement {
             obj: unsafe { hex_str_to_ptr(s.trim()).unwrap() },
         }
     }
+}
+
+impl Clone for GapObj {
+    fn clone(&self) -> Self {
+        root_obj(&self.element);
+        Self {
+            element: self.element.clone(),
+        }
+    }
+}
+
+impl Drop for GapObj {
+    fn drop(&mut self) {
+        unroot_obj(&self.element);
+    }
+}
+
+impl GapObj {
+    pub fn new(element: GapElement) -> Self {
+        root_obj(&element);
+        Self { element }
+    }
+
+    pub fn as_element(&self) -> &GapElement {
+        &self.element
+    }
+}
+
+impl Deref for GlobalGapGuard {
+    type Target = Gap;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for GlobalGapGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GapBuilder {
+    root: Option<PathBuf>,
+}
+
+impl GapBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn root<P: AsRef<Path>>(mut self, root: P) -> Self {
+        self.root = Some(root.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn init_global(self) -> Result<()> {
+        let _init_guard = GLOBAL_GAP_INIT
+            .lock()
+            .map_err(|_| anyhow!("global GAP initialization mutex was poisoned"))?;
+        if GLOBAL_GAP.get().is_some() {
+            return Err(anyhow!("global GAP runtime is already initialized"));
+        }
+
+        let gap = match self.root {
+            Some(root) => Gap::try_init_with_root(root)?,
+            None => Gap::try_init()?,
+        };
+        GLOBAL_GAP
+            .set(Mutex::new(gap))
+            .map_err(|_| anyhow!("global GAP runtime is already initialized"))
+    }
+}
+
+pub fn init_global() -> Result<()> {
+    GapBuilder::new().init_global()
+}
+
+pub fn global() -> Result<GlobalGapGuard> {
+    ensure_global()?;
+    let guard = GLOBAL_GAP
+        .get()
+        .expect("global GAP should be initialized")
+        .lock()
+        .map_err(|_| anyhow!("global GAP runtime mutex was poisoned"))?;
+    Ok(GlobalGapGuard { guard })
+}
+
+pub fn with_gap<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce(&mut Gap) -> Result<T>,
+{
+    let mut gap = global()?;
+    f(&mut gap)
 }
 
 impl Gap {
@@ -201,6 +309,14 @@ impl Gap {
         }
     }
 
+    pub fn root(&self, element: GapElement) -> GapObj {
+        GapObj::new(element)
+    }
+
+    pub fn eval_rooted(&self, cmd: &str) -> Result<GapObj> {
+        Ok(self.root(self.eval(cmd)?))
+    }
+
     pub fn global(&self, name: &str) -> Result<GapElement> {
         let raw_ptr = CString::new(name)
             .context("GAP global variable name contains an interior NUL byte")?
@@ -226,6 +342,14 @@ impl Gap {
     pub fn call_global(&self, name: &str, args: &[&GapElement]) -> Result<GapElement> {
         let function = self.global(name)?;
         self.call_function(&function, args)
+    }
+
+    pub fn global_rooted(&self, name: &str) -> Result<GapObj> {
+        Ok(self.root(self.global(name)?))
+    }
+
+    pub fn call_global_rooted(&self, name: &str, args: &[&GapElement]) -> Result<GapObj> {
+        Ok(self.root(self.call_global(name, args)?))
     }
 
     pub fn int(&self, value: isize) -> GapElement {
@@ -272,6 +396,10 @@ impl Gap {
         }
     }
 
+    pub fn list_rooted(&self, elements: &[GapElement]) -> GapObj {
+        self.root(self.list(elements))
+    }
+
     pub fn list_len(&self, list: &GapElement) -> usize {
         unsafe { LEN_LIST(list.obj) as usize }
     }
@@ -294,6 +422,10 @@ impl Gap {
         result
     }
 
+    pub fn permutation_from_zero_based_images_rooted(&self, images: &[usize]) -> Result<GapObj> {
+        Ok(self.root(self.permutation_from_zero_based_images(images)?))
+    }
+
     pub fn permutation_images_zero_based(
         &self,
         permutation: &GapElement,
@@ -314,19 +446,29 @@ impl Gap {
     }
 
     pub fn free(&self, obj: &GapElement) {
-        unsafe {
-            let refs = OBJ_REFS.as_mut().unwrap();
-            if let Some(idx) = refs.iter().position(|x| x.obj == obj.obj) {
-                refs.remove(idx);
-            }
-        }
+        unroot_obj(obj);
     }
 
     pub fn alloc(&self, obj: &GapElement) {
-        unsafe {
-            OBJ_REFS.as_mut().unwrap().push(obj.to_owned());
-        }
+        root_obj(obj);
     }
+}
+
+fn ensure_global() -> Result<()> {
+    if GLOBAL_GAP.get().is_some() {
+        return Ok(());
+    }
+
+    let _init_guard = GLOBAL_GAP_INIT
+        .lock()
+        .map_err(|_| anyhow!("global GAP initialization mutex was poisoned"))?;
+    if GLOBAL_GAP.get().is_none() {
+        let gap = Gap::try_init()?;
+        GLOBAL_GAP
+            .set(Mutex::new(gap))
+            .map_err(|_| anyhow!("global GAP runtime is already initialized"))?;
+    }
+    Ok(())
 }
 
 fn check_gap_error(context: &str) -> Result<()> {
@@ -401,13 +543,45 @@ fn validate_gap_root(root: &Path) -> Result<()> {
 // Garbage collector interface
 
 static mut OBJ_REFS: *mut Vec<GapElement> = ptr::null_mut();
+static OBJ_REFS_LOCK: Mutex<()> = Mutex::new(());
+static GLOBAL_GAP: OnceLock<Mutex<Gap>> = OnceLock::new();
+static GLOBAL_GAP_INIT: Mutex<()> = Mutex::new(());
 static GAP_ERROR_OCCURRED: AtomicBool = AtomicBool::new(false);
+
+fn root_obj(obj: &GapElement) {
+    let _guard = OBJ_REFS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        OBJ_REFS
+            .as_mut()
+            .expect("GAP object rooting is only available after GAP initialization")
+            .push(obj.to_owned());
+    }
+}
+
+fn unroot_obj(obj: &GapElement) {
+    let _guard = OBJ_REFS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        let refs = OBJ_REFS
+            .as_mut()
+            .expect("GAP object rooting is only available after GAP initialization");
+        if let Some(idx) = refs.iter().position(|x| x.obj == obj.obj) {
+            refs.remove(idx);
+        }
+    }
+}
 
 unsafe extern "C" fn gap_error_callback() {
     GAP_ERROR_OCCURRED.store(true, Ordering::SeqCst);
 }
 
 unsafe extern "C" fn mark_bag() {
+    let _guard = OBJ_REFS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for o in &*OBJ_REFS {
         SYSGAP_MarkBag(o.obj);
     }
