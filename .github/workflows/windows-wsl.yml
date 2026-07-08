@@ -9,6 +9,8 @@ env:
   CARGO_TERM_COLOR: always
   WSL_DISTRO: gap-sys-ubuntu-22.04
   WSL_ROOTFS_URL: https://cloud-images.ubuntu.com/wsl/releases/22.04/current/ubuntu-jammy-wsl-amd64-wsl.rootfs.tar.gz
+  WSL_REPO: /tmp/gap-sys-src
+  WSL_TARGET_DIR: /tmp/gap-sys-target
 
 jobs:
   windows-wsl-apt:
@@ -41,20 +43,26 @@ jobs:
           wsl -d $env:WSL_DISTRO --exec gap -q -c $gapQuery
           wsl -d $env:WSL_DISTRO --exec find /usr/include /usr/lib "(" -name "libgap-api.h" -o -name "gap_all.h" -o -name "libgap.so*" ")"
 
-      - name: Build in WSL
+      - name: Copy source into WSL filesystem
         shell: pwsh
         run: |
-          $repo = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
-          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$repo'; cargo check"
+          $workspace = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; mkdir -p '$env:WSL_REPO'; tar -C '$workspace' --exclude=.git --exclude=target -cf - . | tar -C '$env:WSL_REPO' -xf -; cd '$env:WSL_REPO'; pwd; df -h /tmp; rustc --version; cargo --version; clang --version"
+
+      - name: Build in WSL
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$env:WSL_REPO'; CARGO_TARGET_DIR='$env:WSL_TARGET_DIR' timeout --foreground 20m cargo check -vv"
 
       - name: Test in WSL
+        timeout-minutes: 25
         shell: pwsh
         run: |
-          $repo = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
-          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$repo'; cargo test"
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$env:WSL_REPO'; CARGO_TARGET_DIR='$env:WSL_TARGET_DIR' timeout --foreground 20m cargo test -vv"
 
       - name: GAP smoke test in WSL
+        timeout-minutes: 10
         shell: pwsh
         run: |
-          $repo = (wsl -d $env:WSL_DISTRO --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
-          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$repo'; cargo test test_smoke_one_plus_one -- --ignored --test-threads=1"
+          wsl -d $env:WSL_DISTRO --exec bash -lc "set -euxo pipefail; cd '$env:WSL_REPO'; CARGO_TARGET_DIR='$env:WSL_TARGET_DIR' timeout --foreground 8m cargo test -vv test_smoke_one_plus_one -- --ignored --test-threads=1"
