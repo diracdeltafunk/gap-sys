@@ -21,23 +21,30 @@ jobs:
         uses: Vampire/setup-wsl@v7
         timeout-minutes: 25
         with:
-          distribution: Ubuntu-22.04
+          distribution: Ubuntu-24.04
           wsl-version: 2
           update: 'true'
           additional-packages: |
             build-essential
-            cargo
             clang
+            curl
             gap
             gap-dev
             libclang-dev
             libgap-dev
             pkg-config
-            rustc
+
+      - name: Install stable Rust in WSL
+        timeout-minutes: 10
+        shell: wsl-bash {0}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
 
       - name: Show GAP installation in WSL
         shell: wsl-bash {0}
         run: |
+          . "$HOME/.cargo/env"
           gap -q -c 'Print(GAPInfo.Version, "\n"); for p in GAPInfo.RootPaths do if IsExistingFile(Concatenation(p,"lib/init.g")) then Print(p,"\n"); fi; od; QUIT;'
           find /usr/include /usr/lib \( -name 'libgap-api.h' -o -name 'gap_all.h' -o -name 'libgap.so*' \)
           rustc --version
@@ -49,14 +56,20 @@ jobs:
       - name: Build in WSL
         timeout-minutes: 25
         shell: wsl-bash {0}
-        run: timeout --foreground 20m cargo check -vv
+        run: |
+          . "$HOME/.cargo/env"
+          timeout --foreground 20m cargo check -vv
 
       - name: Test in WSL
         timeout-minutes: 25
         shell: wsl-bash {0}
-        run: timeout --foreground 20m cargo test -vv
+        run: |
+          . "$HOME/.cargo/env"
+          timeout --foreground 20m cargo test -vv
 
       - name: GAP smoke test in WSL
         timeout-minutes: 10
         shell: wsl-bash {0}
-        run: timeout --foreground 8m cargo test -vv test_smoke_one_plus_one -- --ignored --test-threads=1
+        run: |
+          . "$HOME/.cargo/env"
+          timeout --foreground 8m cargo test -vv test_smoke_one_plus_one -- --ignored --test-threads=1
