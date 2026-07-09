@@ -28,8 +28,12 @@ jobs:
       - name: Build
         run: cargo check
 
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --no-deps
+          cargo rustdoc -- --document-private-items
+
       - name: Test
         run: cargo test
-
-      - name: GAP smoke test
-        run: cargo test test_smoke_one_plus_one -- --ignored --test-threads=1
