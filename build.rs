@@ -9,6 +9,11 @@ use gap_config::{
 use std::fs;
 use std::path::PathBuf;
 
+/// Discovers GAP, emits Cargo link metadata, and generates bindgen bindings.
+///
+/// The generated `wrapper.h` hides libgap API differences behind small
+/// `SYSGAP_*` C functions. bindgen then produces Rust declarations for both
+/// the raw GAP API and those compatibility shims.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=gap_config.rs");

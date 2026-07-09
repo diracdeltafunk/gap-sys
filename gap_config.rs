@@ -1,37 +1,70 @@
+//! GAP installation discovery shared by `build.rs` and tests.
+//!
+//! The build script needs three pieces of information before bindgen can run:
+//! the runtime GAP root, the directories containing GAP headers, and the
+//! directories containing libgap. This module keeps that probing logic
+//! testable without executing the full Cargo build script.
+
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Environment variable for the GAP runtime root containing `lib/init.g`.
 pub const GAP_SYS_ROOT: &str = "GAP_SYS_ROOT";
+/// Environment variable for the GAP executable used during root discovery.
 pub const GAP_SYS_GAP_BIN: &str = "GAP_SYS_GAP_BIN";
+/// Environment variable containing a platform-separated list of header dirs.
 pub const GAP_SYS_INCLUDE_DIRS: &str = "GAP_SYS_INCLUDE_DIRS";
+/// Environment variable containing a platform-separated list of libgap dirs.
 pub const GAP_SYS_LIB_DIRS: &str = "GAP_SYS_LIB_DIRS";
+/// GAP code used when `gap --print-gaproot` is unavailable.
+///
+/// Older GAP releases print a banner or prompt instead of supporting
+/// `--print-gaproot`. This snippet asks GAP itself for roots containing the
+/// core `lib/init.g` file and exits immediately.
 const GAP_ROOT_QUERY: &str = "for p in GAPInfo.RootPaths do if IsExistingFile(Concatenation(p,\"lib/init.g\")) then Print(p,\"\\n\"); fi; od; QUIT;";
 
+/// Header include style used by the local GAP installation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeaderLayout {
+    /// Headers are under an include prefix, for example `include/gap/gap_all.h`.
     IncludeSubdir,
+    /// Headers are directly in a source directory, for example `src/gap_all.h`.
     Direct,
 }
 
+/// Complete build-time configuration for libgap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GapConfig {
+    /// Runtime GAP root containing `lib/init.g`.
     pub root: PathBuf,
+    /// Include directories passed to clang and `cc`.
     pub include_dirs: Vec<PathBuf>,
+    /// Native library search directories passed to rustc.
     pub lib_dirs: Vec<PathBuf>,
+    /// Header layout used when generating the bindgen wrapper header.
     pub header_layout: HeaderLayout,
 }
 
+/// Captured GAP discovery environment.
+///
+/// Tests construct this explicitly; the build script uses
+/// [`DiscoveryEnv::from_process_env`] to read the real process environment.
 #[derive(Clone, Debug, Default)]
 pub struct DiscoveryEnv {
+    /// Optional `GAP_SYS_ROOT` value.
     pub root: Option<OsString>,
+    /// Optional `GAP_SYS_GAP_BIN` value.
     pub gap_bin: Option<OsString>,
+    /// Optional `GAP_SYS_INCLUDE_DIRS` value.
     pub include_dirs: Option<OsString>,
+    /// Optional `GAP_SYS_LIB_DIRS` value.
     pub lib_dirs: Option<OsString>,
 }
 
 impl DiscoveryEnv {
+    /// Reads all supported GAP discovery variables from the current process.
     pub fn from_process_env() -> Self {
         Self {
             root: env::var_os(GAP_SYS_ROOT),
@@ -42,6 +75,12 @@ impl DiscoveryEnv {
     }
 }
 
+/// Discovers the GAP root, include directories, library directories, and layout.
+///
+/// Explicit environment values take precedence. If no root is supplied, the
+/// function queries a GAP executable. Include and library directories are
+/// inferred from the resolved root unless their corresponding environment
+/// variables are set.
 pub fn discover_gap_config(env: &DiscoveryEnv) -> Result<GapConfig, String> {
     let root = env
         .root
@@ -83,6 +122,12 @@ pub fn discover_gap_config(env: &DiscoveryEnv) -> Result<GapConfig, String> {
     })
 }
 
+/// Generates the C wrapper header that bindgen reads.
+///
+/// The wrapper normalizes GAP API differences across releases: callback
+/// signatures, `GAP_Enter` availability, output stream state, function calls,
+/// and bag marking. Keeping those shims in C lets bindgen expose stable Rust
+/// symbols such as `SYSGAP_Initialize` and `SYSGAP_CallFunc2Args`.
 pub fn wrapper_header(layout: &HeaderLayout) -> String {
     let includes = match layout {
         HeaderLayout::IncludeSubdir => "#include <gap/libgap-api.h>\n#include <gap/gap_all.h>",
@@ -169,6 +214,11 @@ static inline void SYSGAP_MarkBag(Obj obj) {{
     )
 }
 
+/// Asks a GAP executable to print a usable runtime root.
+///
+/// The preferred command is `gap --print-gaproot`. If that does not produce a
+/// valid root, the function falls back to evaluating `GAP_ROOT_QUERY` through
+/// GAP itself for compatibility with older releases.
 fn query_gap_root(env: &DiscoveryEnv) -> Result<PathBuf, String> {
     let explicit_gap_bin = env.gap_bin.as_ref().is_some();
     let gap_bin = env
@@ -225,6 +275,10 @@ fn query_gap_root(env: &DiscoveryEnv) -> Result<PathBuf, String> {
     }
 }
 
+/// Runs `gap_bin` with `args` while closing stdin.
+///
+/// Closing stdin prevents build scripts from accidentally blocking on an
+/// interactive GAP prompt when discovery fails.
 fn run_gap_command<const N: usize>(
     gap_bin: &Path,
     args: [&str; N],
@@ -235,6 +289,11 @@ fn run_gap_command<const N: usize>(
         .output()
 }
 
+/// Extracts the best GAP root candidate from command output.
+///
+/// The parser tolerates startup banners, prompts, and warnings. It prefers a
+/// path that already contains `lib/init.g`, but keeps the first existing
+/// directory as a fallback for later resolution.
 fn parse_gap_root_stdout(stdout: &[u8]) -> Option<PathBuf> {
     let stdout = String::from_utf8_lossy(stdout);
     let mut existing_dir = None;
@@ -256,6 +315,10 @@ fn parse_gap_root_stdout(stdout: &[u8]) -> Option<PathBuf> {
     existing_dir
 }
 
+/// Parses one possible path line from GAP command output.
+///
+/// GAP prompts such as `gap>` are stripped before checking whether the
+/// remaining text looks like a filesystem path.
 fn parse_gap_root_line(line: &str) -> Option<PathBuf> {
     let line = line.trim();
     let line = line.strip_prefix("gap>").unwrap_or(line).trim();
@@ -267,6 +330,10 @@ fn parse_gap_root_line(line: &str) -> Option<PathBuf> {
     Some(PathBuf::from(line))
 }
 
+/// Returns whether `path` has a shape worth treating as a filesystem path.
+///
+/// This deliberately stays syntactic so it can accept paths that may only
+/// become valid after root candidate resolution.
 fn is_plausible_path(path: &str) -> bool {
     path.starts_with('/')
         || path.starts_with('\\')
@@ -279,6 +346,11 @@ fn is_plausible_path(path: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// Resolves a printed or configured root to the directory containing `lib/init.g`.
+///
+/// Package managers sometimes report a package root such as `share/gap` or
+/// `lib/gap` while the embeddable runtime lives in a nearby `libexec`
+/// directory. Candidate probing handles those common layouts.
 fn resolve_gap_root(root: &Path) -> Result<PathBuf, String> {
     let candidates = gap_root_candidates(root);
     for candidate in &candidates {
@@ -294,6 +366,11 @@ fn resolve_gap_root(root: &Path) -> Result<PathBuf, String> {
     ))
 }
 
+/// Returns candidate runtime roots near `root`.
+///
+/// The first candidate is always the supplied root. Nearby `libexec`,
+/// `share/gap`, and `lib/gap` directories are then added while preserving order
+/// and uniqueness.
 fn gap_root_candidates(root: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     push_unique(&mut candidates, root.to_path_buf());
@@ -307,6 +384,11 @@ fn gap_root_candidates(root: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+/// Infers include directories from a resolved GAP runtime root.
+///
+/// Source-tree layouts expose headers directly under `src` and generated
+/// headers under `build`. Installed layouts expose headers under an include
+/// prefix with a `gap/` subdirectory.
 fn infer_include_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -332,6 +414,7 @@ fn infer_include_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Adds `dir` when it contains installed-style GAP headers.
 fn push_include_candidate(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
     if dir.join("gap").join("libgap-api.h").is_file() && dir.join("gap").join("gap_all.h").is_file()
     {
@@ -339,6 +422,10 @@ fn push_include_candidate(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
     }
 }
 
+/// Infers native library search directories from a resolved GAP root.
+///
+/// The search covers the root itself, nearby `lib` directories, common
+/// multiarch children, and `lib64` under an installation prefix.
 fn infer_lib_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -358,6 +445,10 @@ fn infer_lib_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Adds `dir` and its immediate child directories when they contain libgap.
+///
+/// Immediate children cover layouts such as `lib/x86_64-linux-gnu` without a
+/// recursive filesystem walk during build scripts.
 fn push_lib_candidates_under(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
     push_lib_candidate(dirs, dir.clone());
 
@@ -373,12 +464,17 @@ fn push_lib_candidates_under(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
     }
 }
 
+/// Adds `dir` if it contains a recognized libgap library file.
 fn push_lib_candidate(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
     if contains_libgap(&dir) {
         push_unique(dirs, dir);
     }
 }
 
+/// Detects whether include directories use installed or direct header layout.
+///
+/// Installed `gap/` subdirectories are preferred because they match normal
+/// compiler include-prefix conventions.
 fn find_header_layout(include_dirs: &[PathBuf]) -> Option<HeaderLayout> {
     for dir in include_dirs {
         if dir.join("gap").join("libgap-api.h").is_file()
@@ -397,6 +493,7 @@ fn find_header_layout(include_dirs: &[PathBuf]) -> Option<HeaderLayout> {
     None
 }
 
+/// Returns whether `dir` contains a recognizable libgap artifact.
 fn contains_libgap(dir: &Path) -> bool {
     let Ok(entries) = dir.read_dir() else {
         return false;
@@ -411,6 +508,7 @@ fn contains_libgap(dir: &Path) -> bool {
     })
 }
 
+/// Matches common shared, static, versioned, and Windows libgap filenames.
 fn is_libgap_file_name(name: &str) -> bool {
     matches!(
         name,
@@ -419,12 +517,17 @@ fn is_libgap_file_name(name: &str) -> bool {
         || (name.starts_with("libgap.") && name.ends_with(".dylib"))
 }
 
+/// Parses a platform-separated path-list environment value.
+///
+/// Empty entries are ignored so accidental leading or trailing separators do
+/// not become the current directory.
 fn parse_path_list(paths: &OsStr) -> Vec<PathBuf> {
     env::split_paths(paths)
         .filter(|path| !path.as_os_str().is_empty())
         .collect()
 }
 
+/// Converts a non-empty OS string to a path.
 fn nonempty_path(path: &OsStr) -> Option<PathBuf> {
     if path.is_empty() {
         None
@@ -433,12 +536,14 @@ fn nonempty_path(path: &OsStr) -> Option<PathBuf> {
     }
 }
 
+/// Appends `path` if it is not already present.
 fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.iter().any(|existing| existing == &path) {
         paths.push(path);
     }
 }
 
+/// Formats a path list for human-readable error messages.
 fn display_paths(paths: &[PathBuf]) -> String {
     if paths.is_empty() {
         "<none>".to_string()
