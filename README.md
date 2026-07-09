@@ -40,19 +40,29 @@ cargo build
 
 At runtime, `Gap::init()` uses `GAP_SYS_ROOT` if it is set, otherwise it uses the GAP root detected at build time. Some package managers split GAP across multiple root directories, for example a core root under `lib/gap` and package data under `share/gap`; when `gap-sys` sees that layout, it passes both roots to libgap so packages remain discoverable. Use `Gap::try_init()` or `Gap::try_init_with_root(...)` for fallible initialization with better diagnostics.
 
+## Values and garbage collection
+
+The ordinary API returns `GapValue`, an owned handle that keeps its GAP value
+rooted across later GAP calls. This is the type to store, return, and pass to
+other ordinary wrapper methods. Advanced `*_unrooted` methods use `GapRef`, a
+copyable handle that may become invalid after a GAP operation that allocates.
+See [MIGRATING.md](MIGRATING.md) for the exact rename map from
+`upstream/master`.
+
+## Examples
+
 #### Example showing how to create a Group
 ```
 let mut gap = Gap::init();
-let gap_element = gap.eval("Group((1,2,3),(1,2));").unwrap();
-assert_eq!(gap.elem_string(&gap_element), "Group( [ (1,2,3), (1,2) ] )");
+let group = gap.eval("Group((1,2,3),(1,2));").unwrap();
+assert_eq!(gap.display(&group), "Group( [ (1,2,3), (1,2) ] )");
 ```
 
 #### Example showing how to access elements of a list
 ```
 let mut gap = Gap::init();
-let outer_list = gap.eval("[[1, 2, 3], [4, 5, 6]];;").unwrap();
-let inner_list = gap.get_list_elem(&outer_list, 1).unwrap();
-let element = gap.get_list_elem(&inner_list, 1).unwrap();
-let string = gap.elem_string(&element);
-assert_eq!(string, "5");
+let outer_list = gap.eval("[[1, 2, 3], [4, 5, 6]];").unwrap();
+let inner_list = gap.list_get(&outer_list, 1).unwrap();
+let value = gap.list_get(&inner_list, 1).unwrap();
+assert_eq!(gap.to_usize(&value).unwrap(), 5);
 ```

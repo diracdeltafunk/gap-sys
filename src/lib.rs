@@ -10,9 +10,9 @@
 //! few primitive values, and keeping selected GAP objects alive across garbage
 //! collections.
 //!
-//! GAP owns every `Obj`. A [`GapElement`] is only a lightweight handle to that
-//! object; use [`GapObj`] or [`Gap::alloc`] when a handle must survive calls
-//! that may allocate and trigger the GAP garbage collector.
+//! GAP owns every `Obj`. A [`GapValue`] owns a GC root, so it can safely survive
+//! later GAP calls. [`GapRef`] is the explicit low-level, unrooted handle for
+//! code that can prove it will not cross a GAP allocation.
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
@@ -55,14 +55,14 @@ impl Drop for Gap {
     }
 }
 
-/// A borrowed handle to a GAP object.
+/// An unrooted handle to a GAP object.
 ///
-/// This is a copyable Rust-side wrapper around GAP's raw `Obj` pointer. It does
-/// not root the object with GAP's garbage collector. If the object needs to
-/// remain valid across any operation that can allocate in GAP, convert it into
-/// a [`GapObj`] with [`Gap::root`] or explicitly call [`Gap::alloc`].
-#[derive(Clone, Debug)]
-pub struct GapElement {
+/// This is a copyable Rust-side wrapper around GAP's raw `Obj` pointer. It is
+/// not a Rust borrow and does not root the object with GAP's garbage collector.
+/// It may become invalid after a GAP operation that allocates. Prefer
+/// [`GapValue`], which is what the normal public API returns.
+#[derive(Clone, Copy, Debug)]
+pub struct GapRef {
     /// Raw GAP object pointer produced by libgap.
     ///
     /// The pointer is meaningful only while the libgap runtime is initialized
@@ -70,15 +70,19 @@ pub struct GapElement {
     pub obj: Obj,
 }
 
-/// An owned, garbage-collector-rooted GAP object handle.
+/// Deprecated name for [`GapRef`].
+#[deprecated(since = "0.2.4", note = "renamed to `GapRef`")]
+pub type GapElement = GapRef;
+
+/// An owned, garbage-collector-rooted GAP value.
 ///
-/// Cloning a `GapObj` adds another entry to the root table, and dropping it
+/// Cloning a `GapValue` adds another entry to the root table, and dropping it
 /// removes one. This makes the wrapped GAP object safe to keep in Rust data
 /// structures across GAP allocations.
 #[derive(Debug)]
-pub struct GapObj {
-    /// The borrowed object handle that is registered in `OBJ_REFS`.
-    element: GapElement,
+pub struct GapValue {
+    /// The unrooted handle registered in `OBJ_REFS`.
+    reference: GapRef,
 }
 
 /// Mutex guard for the process-global [`Gap`] runtime.
@@ -90,7 +94,7 @@ pub struct GlobalGapGuard {
     guard: MutexGuard<'static, Gap>,
 }
 
-impl fmt::Display for GapElement {
+impl fmt::Display for GapRef {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         unsafe {
             let cstr = CStr::from_ptr(GAP_CSTR_STRING(self.obj));
@@ -99,7 +103,7 @@ impl fmt::Display for GapElement {
     }
 }
 
-impl fmt::Pointer for GapElement {
+impl fmt::Pointer for GapRef {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:p}", self.obj)
     }
@@ -108,7 +112,7 @@ impl fmt::Pointer for GapElement {
 /// Parses a hexadecimal address string into a raw GAP bag pointer.
 ///
 /// This exists for compatibility with older call sites that serialized GAP
-/// object addresses as strings. New code should pass `GapElement` or `GapObj`
+/// object addresses as strings. New code should pass `GapRef` or `GapValue`
 /// values directly instead of round-tripping through text.
 ///
 /// # Safety
@@ -121,47 +125,48 @@ unsafe fn hex_str_to_ptr(hex_str: &str) -> Result<Bag, std::num::ParseIntError> 
     Ok(addr as Bag)
 }
 
-/// Converts a textual raw pointer address into a `GapElement`.
+/// Converts a textual raw pointer address into a `GapRef`.
 ///
 /// This is intended only for legacy pointer-string interop. It panics if `s`
 /// is not a valid hexadecimal address.
-impl From<&str> for GapElement {
+impl From<&str> for GapRef {
     fn from(s: &str) -> Self {
-        GapElement {
+        GapRef {
             obj: unsafe { hex_str_to_ptr(s.trim()).unwrap() },
         }
     }
 }
 
-impl Clone for GapObj {
+impl Clone for GapValue {
     fn clone(&self) -> Self {
-        root_obj(&self.element);
+        root_obj(&self.reference);
         Self {
-            element: self.element.clone(),
+            reference: self.reference,
         }
     }
 }
 
-impl Drop for GapObj {
+impl Drop for GapValue {
     fn drop(&mut self) {
-        unroot_obj(&self.element);
+        unroot_obj(&self.reference);
     }
 }
 
-impl GapObj {
-    /// Roots `element` and returns an owned GAP object handle.
+impl GapValue {
+    /// Roots `reference` and returns an owned GAP value.
     ///
-    /// The root is released when the returned `GapObj` is dropped.
-    pub fn new(element: GapElement) -> Self {
-        root_obj(&element);
-        Self { element }
+    /// The root is released when the returned `GapValue` is dropped.
+    fn new(reference: GapRef) -> Self {
+        root_obj(&reference);
+        Self { reference }
     }
 
-    /// Returns the borrowed handle for calls that accept a [`GapElement`].
+    /// Returns the unrooted handle for an explicitly low-level operation.
     ///
-    /// The returned reference remains protected by this `GapObj`'s root.
-    pub fn as_element(&self) -> &GapElement {
-        &self.element
+    /// The returned handle remains protected by this `GapValue`'s root for as
+    /// long as this value is retained.
+    pub fn as_unrooted(&self) -> GapRef {
+        self.reference
     }
 }
 
@@ -263,13 +268,19 @@ where
     f(&mut gap)
 }
 
-/// Evaluates GAP source text in the process-global runtime and roots the result.
+/// Evaluates GAP source text in the process-global runtime.
 ///
-/// This is shorthand for `global()?.eval_rooted(cmd)`. It is useful for small
+/// This is shorthand for `global()?.eval(cmd)`. It is useful for small
 /// programs and tests; use [`with_gap`] or [`global`] when several operations
 /// should share one lock scope.
-pub fn gap_eval(cmd: &str) -> Result<GapObj> {
-    global()?.eval_rooted(cmd)
+pub fn eval(cmd: &str) -> Result<GapValue> {
+    global()?.eval(cmd)
+}
+
+/// Deprecated alias for [`eval`].
+#[deprecated(since = "0.2.4", note = "renamed to `eval`")]
+pub fn gap_eval(cmd: &str) -> Result<GapValue> {
+    eval(cmd)
 }
 
 impl Gap {
@@ -387,17 +398,25 @@ impl Gap {
         })
     }
 
-    /// Evaluates GAP source text and returns the last result.
+    /// Evaluates GAP source text and returns a GC-rooted result.
     ///
     /// `cmd` is parsed by GAP's ordinary command reader through an
-    /// `InputTextString`. The returned [`GapElement`] is not rooted; root it
-    /// before making further GAP calls if it must survive allocation.
+    /// `InputTextString`. The returned [`GapValue`] can safely survive later
+    /// GAP calls and can be stored in Rust data structures.
     ///
     /// # Panics
     ///
     /// Panics if `cmd` contains an interior NUL byte, because GAP receives it as
     /// a C string.
-    pub fn eval(&self, cmd: &str) -> Result<GapElement> {
+    pub fn eval(&self, cmd: &str) -> Result<GapValue> {
+        Ok(self.root(self.eval_unrooted(cmd)?))
+    }
+
+    /// Evaluates GAP source text and returns an unrooted result.
+    ///
+    /// This is an advanced API. The returned [`GapRef`] may become invalid
+    /// after any GAP operation that allocates. Prefer [`Gap::eval`].
+    pub fn eval_unrooted(&self, cmd: &str) -> Result<GapRef> {
         let c_cmd = CString::new(cmd).unwrap();
 
         unsafe {
@@ -413,20 +432,33 @@ impl Gap {
 
             if success == GAP_True {
                 let obj = GAP_ElmList(obj, 2);
-                Ok(GapElement { obj })
+                Ok(GapRef { obj })
             } else {
                 Err(anyhow::anyhow!("Error evaluating command"))
             }
         }
     }
 
+    /// Deprecated alias for [`Gap::eval`].
+    #[deprecated(since = "0.2.4", note = "renamed to `eval`")]
+    pub fn eval_rooted(&self, cmd: &str) -> Result<GapValue> {
+        self.eval(cmd)
+    }
+
     /// Renders a GAP object with GAP's `PrintTo` and returns the resulting text.
     ///
     /// The wrapper reuses an internal GAP string as the output buffer, which is
     /// why this method takes `&mut self`.
-    pub fn elem_string(&mut self, element: &GapElement) -> String {
+    pub fn display(&mut self, value: &GapValue) -> String {
+        self.display_unrooted(value.as_unrooted())
+    }
+
+    /// Renders an unrooted GAP handle.
+    ///
+    /// The handle must remain valid for this call. Prefer [`Gap::display`].
+    pub fn display_unrooted(&mut self, value: GapRef) -> String {
         unsafe {
-            SYSGAP_CallFunc2Args(self.print_fn, self.output_stream_handle, element.obj);
+            SYSGAP_CallFunc2Args(self.print_fn, self.output_stream_handle, value.obj);
         }
 
         let cstr: &CStr = unsafe { CStr::from_ptr(GAP_CSTR_STRING(self.output_str_obj)) };
@@ -439,37 +471,55 @@ impl Gap {
         copy
     }
 
-    /// Returns an element from a GAP list using a zero-based Rust index.
+    /// Deprecated alias for [`Gap::display_unrooted`].
+    #[deprecated(since = "0.2.4", note = "renamed to `display_unrooted`")]
+    pub fn elem_string(&mut self, value: &GapRef) -> String {
+        self.display_unrooted(*value)
+    }
+
+    /// Returns a GC-rooted value from a GAP list using a zero-based Rust index.
     ///
     /// GAP lists are one-based, so `idx` is incremented before calling into
-    /// libgap. The returned element is not rooted.
-    pub fn get_list_elem(&self, list: &GapElement, idx: usize) -> Result<GapElement> {
+    /// libgap.
+    pub fn list_get(&self, list: &GapValue, idx: usize) -> Result<GapValue> {
+        Ok(self.root(self.list_get_unrooted(list.as_unrooted(), idx)?))
+    }
+
+    /// Returns an unrooted value from a GAP list using a zero-based Rust index.
+    ///
+    /// This is an advanced API. Prefer [`Gap::list_get`].
+    pub fn list_get_unrooted(&self, list: GapRef, idx: usize) -> Result<GapRef> {
         unsafe {
             let obj = GAP_ElmList(list.obj, idx + 1);
-            Ok(GapElement { obj })
+            Ok(GapRef { obj })
         }
     }
 
-    /// Roots a borrowed GAP object and returns an owned handle.
+    /// Deprecated alias for [`Gap::list_get_unrooted`].
+    #[deprecated(since = "0.2.4", note = "renamed to `list_get_unrooted`")]
+    pub fn get_list_elem(&self, list: &GapRef, idx: usize) -> Result<GapRef> {
+        self.list_get_unrooted(*list, idx)
+    }
+
+    /// Roots an unrooted GAP handle and returns an owned value.
     ///
     /// The root is independent of `self`; `self` is present to keep the API
     /// tied to an initialized GAP runtime.
-    pub fn root(&self, element: GapElement) -> GapObj {
-        GapObj::new(element)
-    }
-
-    /// Evaluates GAP source text and roots the result.
-    ///
-    /// This is equivalent to `self.root(self.eval(cmd)?)`.
-    pub fn eval_rooted(&self, cmd: &str) -> Result<GapObj> {
-        Ok(self.root(self.eval(cmd)?))
+    pub fn root(&self, reference: GapRef) -> GapValue {
+        GapValue::new(reference)
     }
 
     /// Looks up a GAP global variable by name.
     ///
-    /// The returned object is not rooted. Use [`Gap::global_rooted`] when the
-    /// global value must be retained across later GAP allocations.
-    pub fn global(&self, name: &str) -> Result<GapElement> {
+    /// The returned value is rooted and can be retained across later GAP calls.
+    pub fn get_global(&self, name: &str) -> Result<GapValue> {
+        Ok(self.root(self.get_global_unrooted(name)?))
+    }
+
+    /// Looks up a GAP global variable by name without rooting it.
+    ///
+    /// This is an advanced API. Prefer [`Gap::get_global`].
+    pub fn get_global_unrooted(&self, name: &str) -> Result<GapRef> {
         let raw_ptr = CString::new(name)
             .context("GAP global variable name contains an interior NUL byte")?
             .into_raw();
@@ -478,49 +528,84 @@ impl Gap {
             let _ = CString::from_raw(raw_ptr);
         }
         check_gap_error("looking up a global variable")?;
-        Ok(GapElement { obj })
+        Ok(GapRef { obj })
+    }
+
+    /// Deprecated alias for [`Gap::get_global_unrooted`].
+    #[deprecated(since = "0.2.4", note = "renamed to `get_global_unrooted`")]
+    pub fn global(&self, name: &str) -> Result<GapRef> {
+        self.get_global_unrooted(name)
     }
 
     /// Calls a GAP function object with positional arguments.
     ///
-    /// `function` must be a callable GAP object. The arguments are borrowed
-    /// `Obj` handles and are passed to `GAP_CallFuncArray` without conversion.
-    /// The returned object is not rooted.
-    pub fn call_function(&self, function: &GapElement, args: &[&GapElement]) -> Result<GapElement> {
+    /// `function` must be a callable GAP value. The result is GC-rooted.
+    pub fn call(&self, function: &GapValue, args: &[&GapValue]) -> Result<GapValue> {
+        let function = function.as_unrooted();
+        let args = args.iter().map(|arg| arg.as_unrooted()).collect::<Vec<_>>();
+        Ok(self.root(self.call_unrooted(function, &args)?))
+    }
+
+    /// Calls a GAP function with unrooted handles and returns an unrooted handle.
+    ///
+    /// This is an advanced API. Prefer [`Gap::call`].
+    pub fn call_unrooted(&self, function: GapRef, args: &[GapRef]) -> Result<GapRef> {
         let mut raw_args = args.iter().map(|arg| arg.obj).collect::<Vec<_>>();
         GAP_ERROR_OCCURRED.store(false, Ordering::SeqCst);
         let obj = unsafe {
             GAP_CallFuncArray(function.obj, raw_args.len() as UInt, raw_args.as_mut_ptr())
         };
         check_gap_error("calling a GAP function")?;
-        Ok(GapElement { obj })
+        Ok(GapRef { obj })
+    }
+
+    /// Deprecated alias for [`Gap::call_unrooted`].
+    #[deprecated(since = "0.2.4", note = "renamed to `call_unrooted`")]
+    pub fn call_function(&self, function: &GapRef, args: &[&GapRef]) -> Result<GapRef> {
+        let args = args.iter().map(|arg| **arg).collect::<Vec<_>>();
+        self.call_unrooted(*function, &args)
     }
 
     /// Looks up a GAP global function by name and calls it.
     ///
-    /// This is a convenience wrapper around [`Gap::global`] and
-    /// [`Gap::call_function`].
-    pub fn call_global(&self, name: &str, args: &[&GapElement]) -> Result<GapElement> {
-        let function = self.global(name)?;
-        self.call_function(&function, args)
+    /// This is a convenience wrapper around [`Gap::get_global`] and [`Gap::call`].
+    pub fn call_global(&self, name: &str, args: &[&GapValue]) -> Result<GapValue> {
+        let function = self.get_global(name)?;
+        self.call(&function, args)
     }
 
-    /// Looks up a GAP global variable and roots the result.
-    pub fn global_rooted(&self, name: &str) -> Result<GapObj> {
-        Ok(self.root(self.global(name)?))
+    /// Calls a GAP global function without rooting its result.
+    ///
+    /// This is an advanced API. Prefer [`Gap::call_global`].
+    pub fn call_global_unrooted(&self, name: &str, args: &[GapRef]) -> Result<GapRef> {
+        let function = self.get_global_unrooted(name)?;
+        self.call_unrooted(function, args)
     }
 
-    /// Calls a GAP global function and roots the result.
-    pub fn call_global_rooted(&self, name: &str, args: &[&GapElement]) -> Result<GapObj> {
-        Ok(self.root(self.call_global(name, args)?))
+    /// Deprecated alias for [`Gap::get_global`].
+    #[deprecated(since = "0.2.4", note = "renamed to `get_global`")]
+    pub fn global_rooted(&self, name: &str) -> Result<GapValue> {
+        self.get_global(name)
+    }
+
+    /// Deprecated alias for [`Gap::call_global`].
+    #[deprecated(since = "0.2.4", note = "renamed to `call_global`")]
+    pub fn call_global_rooted(&self, name: &str, args: &[&GapRef]) -> Result<GapValue> {
+        let args = args.iter().map(|arg| self.root(**arg)).collect::<Vec<_>>();
+        self.call_global(name, &args.iter().collect::<Vec<_>>())
     }
 
     /// Converts a Rust signed integer into GAP's immediate integer format.
     ///
     /// GAP small integers are encoded directly in the `Obj` word. The returned
     /// value does not need GC rooting because it is immediate.
-    pub fn int(&self, value: isize) -> GapElement {
-        GapElement {
+    pub fn int(&self, value: isize) -> GapValue {
+        self.root(self.int_unrooted(value))
+    }
+
+    /// Converts a Rust signed integer into an unrooted GAP immediate integer.
+    pub fn int_unrooted(&self, value: isize) -> GapRef {
+        GapRef {
             obj: unsafe { INTOBJ_INT(value as Int) },
         }
     }
@@ -530,8 +615,13 @@ impl Gap {
     /// Returns an error if GAP produces a negative integer. The current
     /// implementation uses libgap's small-integer conversion and is intended for
     /// values known to fit in GAP's immediate integer representation.
-    pub fn integer_usize(&self, element: &GapElement) -> Result<usize> {
-        let value = unsafe { Int_ObjInt(element.obj) };
+    pub fn to_usize(&self, value: &GapValue) -> Result<usize> {
+        self.to_usize_unrooted(value.as_unrooted())
+    }
+
+    /// Converts an unrooted GAP integer into a Rust `usize`.
+    pub fn to_usize_unrooted(&self, value: GapRef) -> Result<usize> {
+        let value = unsafe { Int_ObjInt(value.obj) };
         if value < 0 {
             return Err(anyhow!(
                 "GAP integer {value} cannot be represented as usize"
@@ -540,14 +630,25 @@ impl Gap {
         Ok(value as usize)
     }
 
+    /// Deprecated alias for [`Gap::to_usize_unrooted`].
+    #[deprecated(since = "0.2.4", note = "renamed to `to_usize`")]
+    pub fn integer_usize(&self, value: &GapRef) -> Result<usize> {
+        self.to_usize_unrooted(*value)
+    }
+
     /// Converts GAP's `true` and `false` objects into a Rust `bool`.
     ///
     /// Returns an error for any non-boolean GAP object.
-    pub fn boolean(&self, element: &GapElement) -> Result<bool> {
+    pub fn to_bool(&self, value: &GapValue) -> Result<bool> {
+        self.to_bool_unrooted(value.as_unrooted())
+    }
+
+    /// Converts an unrooted GAP boolean into a Rust `bool`.
+    pub fn to_bool_unrooted(&self, value: GapRef) -> Result<bool> {
         unsafe {
-            if element.obj == GAP_True {
+            if value.obj == GAP_True {
                 Ok(true)
-            } else if element.obj == GAP_False {
+            } else if value.obj == GAP_False {
                 Ok(false)
             } else {
                 Err(anyhow!("GAP object is not a boolean"))
@@ -555,17 +656,38 @@ impl Gap {
         }
     }
 
-    /// Returns whether `element` is GAP's distinguished `fail` value.
-    pub fn is_fail(&self, element: &GapElement) -> bool {
-        unsafe { element.obj == GAP_Fail || element.obj == Fail }
+    /// Deprecated alias for [`Gap::to_bool_unrooted`].
+    #[deprecated(since = "0.2.4", note = "renamed to `to_bool`")]
+    pub fn boolean(&self, value: &GapRef) -> Result<bool> {
+        self.to_bool_unrooted(*value)
     }
 
-    /// Builds a mutable GAP plain list from already-created GAP objects.
+    /// Returns whether `element` is GAP's distinguished `fail` value.
+    pub fn is_fail(&self, value: &GapValue) -> bool {
+        self.is_fail_unrooted(value.as_unrooted())
+    }
+
+    /// Returns whether an unrooted handle is GAP's distinguished `fail` value.
+    pub fn is_fail_unrooted(&self, value: GapRef) -> bool {
+        unsafe { value.obj == GAP_Fail || value.obj == Fail }
+    }
+
+    /// Builds a GC-rooted mutable GAP plain list from already-created values.
     ///
     /// GAP lists are one-based, so each Rust slice element is written at
-    /// position `idx + 1`. The list itself is a newly allocated GAP object and
-    /// is not rooted unless the caller stores it in a [`GapObj`].
-    pub fn list(&self, elements: &[GapElement]) -> GapElement {
+    /// position `idx + 1`.
+    pub fn list(&self, elements: &[GapValue]) -> GapValue {
+        let elements = elements
+            .iter()
+            .map(|element| element.as_unrooted())
+            .collect::<Vec<_>>();
+        self.root(self.list_unrooted(&elements))
+    }
+
+    /// Builds an unrooted mutable GAP plain list from unrooted handles.
+    ///
+    /// This is an advanced API. Prefer [`Gap::list`].
+    pub fn list_unrooted(&self, elements: &[GapRef]) -> GapRef {
         unsafe {
             let list = NEW_PLIST(TNUM_T_PLIST as UInt, elements.len() as Int);
             SET_LEN_PLIST(list, elements.len() as Int);
@@ -573,17 +695,23 @@ impl Gap {
                 SET_ELM_PLIST(list, idx as Int + 1, element.obj);
             }
             CHANGED_BAG(list);
-            GapElement { obj: list }
+            GapRef { obj: list }
         }
     }
 
-    /// Builds a GAP plain list and roots it.
-    pub fn list_rooted(&self, elements: &[GapElement]) -> GapObj {
-        self.root(self.list(elements))
+    /// Deprecated alias for [`Gap::list`].
+    #[deprecated(since = "0.2.4", note = "renamed to `list`")]
+    pub fn list_rooted(&self, elements: &[GapRef]) -> GapValue {
+        self.root(self.list_unrooted(elements))
     }
 
     /// Returns the length of a GAP list.
-    pub fn list_len(&self, list: &GapElement) -> usize {
+    pub fn list_len(&self, list: &GapValue) -> usize {
+        self.list_len_unrooted(list.as_unrooted())
+    }
+
+    /// Returns the length of a list referenced by an unrooted handle.
+    pub fn list_len_unrooted(&self, list: GapRef) -> usize {
         unsafe { LEN_LIST(list.obj) as usize }
     }
 
@@ -595,7 +723,7 @@ impl Gap {
     ///
     /// Temporary lists are rooted around the GAP call because constructing the
     /// permutation can allocate.
-    pub fn permutation_from_zero_based_images(&self, images: &[usize]) -> Result<GapElement> {
+    pub fn permutation_from_zero_based_images(&self, images: &[usize]) -> Result<GapValue> {
         let source = (1..=images.len())
             .map(|idx| self.int(idx as isize))
             .collect::<Vec<_>>();
@@ -605,17 +733,16 @@ impl Gap {
             .collect::<Vec<_>>();
         let source = self.list(&source);
         let target = self.list(&target);
-        self.alloc(&source);
-        self.alloc(&target);
-        let result = self.call_global("MappingPermListList", &[&source, &target]);
-        self.free(&target);
-        self.free(&source);
-        result
+        self.call_global("MappingPermListList", &[&source, &target])
     }
 
-    /// Builds a GAP permutation from zero-based images and roots it.
-    pub fn permutation_from_zero_based_images_rooted(&self, images: &[usize]) -> Result<GapObj> {
-        Ok(self.root(self.permutation_from_zero_based_images(images)?))
+    /// Deprecated alias for [`Gap::permutation_from_zero_based_images`].
+    #[deprecated(
+        since = "0.2.4",
+        note = "renamed to `permutation_from_zero_based_images`"
+    )]
+    pub fn permutation_from_zero_based_images_rooted(&self, images: &[usize]) -> Result<GapValue> {
+        self.permutation_from_zero_based_images(images)
     }
 
     /// Computes zero-based images of a GAP permutation on `0..degree`.
@@ -624,15 +751,15 @@ impl Gap {
     /// is shifted back to Rust's zero-based convention.
     pub fn permutation_images_zero_based(
         &self,
-        permutation: &GapElement,
+        permutation: &GapValue,
         degree: usize,
     ) -> Result<Vec<usize>> {
-        let on_points = self.global("OnPoints")?;
+        let on_points = self.get_global("OnPoints")?;
         (1..=degree)
             .map(|point| {
                 let point = self.int(point as isize);
-                let image = self.call_function(&on_points, &[&point, permutation])?;
-                self.integer_usize(&image).and_then(|image| {
+                let image = self.call(&on_points, &[&point, permutation])?;
+                self.to_usize(&image).and_then(|image| {
                     image
                         .checked_sub(1)
                         .ok_or_else(|| anyhow!("permutation sent a point outside [1..degree]"))
@@ -641,21 +768,33 @@ impl Gap {
             .collect()
     }
 
-    /// Removes one GC root for `obj`.
+    /// Removes one manually-added GC root for an unrooted handle.
     ///
-    /// This is the manual counterpart to [`Gap::alloc`]. Prefer [`GapObj`] for
+    /// This is the manual counterpart to [`Gap::root_ref`]. Prefer [`GapValue`] for
     /// ordinary ownership because it releases roots automatically on drop.
-    pub fn free(&self, obj: &GapElement) {
-        unroot_obj(obj);
+    pub fn unroot_ref(&self, reference: GapRef) {
+        unroot_obj(&reference);
+    }
+
+    /// Deprecated alias for [`Gap::unroot_ref`].
+    #[deprecated(since = "0.2.4", note = "renamed to `unroot_ref`")]
+    pub fn free(&self, value: &GapRef) {
+        self.unroot_ref(*value);
     }
 
     /// Adds a GC root for `obj`.
     ///
-    /// Each call should be paired with [`Gap::free`] unless ownership is handed
-    /// to a [`GapObj`]. Rooting is required for non-immediate GAP objects that
+    /// Each call should be paired with [`Gap::unroot_ref`] unless ownership is handed
+    /// to a [`GapValue`]. Rooting is required for non-immediate GAP objects that
     /// outlive the GAP call that produced them.
-    pub fn alloc(&self, obj: &GapElement) {
-        root_obj(obj);
+    pub fn root_ref(&self, reference: GapRef) {
+        root_obj(&reference);
+    }
+
+    /// Deprecated alias for [`Gap::root_ref`].
+    #[deprecated(since = "0.2.4", note = "renamed to `root_ref`")]
+    pub fn alloc(&self, value: &GapRef) {
+        self.root_ref(*value);
     }
 }
 
@@ -778,7 +917,7 @@ fn validate_gap_root(root: &Path) -> Result<()> {
 /// libgap calls `mark_bag` during garbage collection. That callback walks this
 /// table and marks each object so GAP will not move or free it while Rust still
 /// holds a rooted handle.
-static mut OBJ_REFS: *mut Vec<GapElement> = ptr::null_mut();
+static mut OBJ_REFS: *mut Vec<GapRef> = ptr::null_mut();
 /// Mutex protecting `OBJ_REFS` from concurrent mutation and marking.
 static OBJ_REFS_LOCK: Mutex<()> = Mutex::new(());
 /// Lazily initialized process-global GAP runtime.
@@ -792,7 +931,7 @@ static GAP_ERROR_OCCURRED: AtomicBool = AtomicBool::new(false);
 ///
 /// Roots are counted by entry rather than by pointer identity: adding the same
 /// object twice requires two matching calls to `unroot_obj`.
-fn root_obj(obj: &GapElement) {
+fn root_obj(obj: &GapRef) {
     let _guard = OBJ_REFS_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -800,7 +939,7 @@ fn root_obj(obj: &GapElement) {
         OBJ_REFS
             .as_mut()
             .expect("GAP object rooting is only available after GAP initialization")
-            .push(obj.to_owned());
+            .push(*obj);
     }
 }
 
@@ -808,7 +947,7 @@ fn root_obj(obj: &GapElement) {
 ///
 /// Missing roots are ignored, matching the historic behavior of the wrapper's
 /// manual `alloc`/`free` API.
-fn unroot_obj(obj: &GapElement) {
+fn unroot_obj(obj: &GapRef) {
     let _guard = OBJ_REFS_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -861,23 +1000,17 @@ mod tests {
     #[test]
     fn test_group() -> Result<()> {
         with_gap(|gap| {
-            let group = gap.eval_rooted("Group((1,2,3),(1,2));")?;
-            assert_eq!(
-                gap.elem_string(group.as_element()),
-                "Group( [ (1,2,3), (1,2) ] )"
-            );
+            let group = gap.eval("Group((1,2,3),(1,2));")?;
+            assert_eq!(gap.display(&group), "Group( [ (1,2,3), (1,2) ] )");
             Ok(())
         })
     }
 
     #[test]
-    fn global_eval_roots_its_result() -> Result<()> {
-        let group = gap_eval("Group((1,2,3),(1,2));")?;
+    fn top_level_eval_roots_its_result() -> Result<()> {
+        let group = eval("Group((1,2,3),(1,2));")?;
         with_gap(|gap| {
-            assert_eq!(
-                gap.elem_string(group.as_element()),
-                "Group( [ (1,2,3), (1,2) ] )"
-            );
+            assert_eq!(gap.display(&group), "Group( [ (1,2,3), (1,2) ] )");
             Ok(())
         })
     }
@@ -886,12 +1019,11 @@ mod tests {
     fn test_direct_product() -> Result<()> {
         with_gap(|gap| {
             let degree = gap.int(7);
-            let s7 = gap.call_global_rooted("SymmetricGroup", &[&degree])?;
-            let product =
-                gap.call_global_rooted("DirectProduct", &[s7.as_element(), s7.as_element()])?;
-            let order = gap.call_global("Order", &[product.as_element()])?;
+            let s7 = gap.call_global("SymmetricGroup", &[&degree])?;
+            let product = gap.call_global("DirectProduct", &[&s7, &s7])?;
+            let order = gap.call_global("Order", &[&product])?;
 
-            assert_eq!(gap.integer_usize(&order)?, 25_401_600);
+            assert_eq!(gap.to_usize(&order)?, 25_401_600);
             Ok(())
         })
     }
@@ -899,15 +1031,15 @@ mod tests {
     #[test]
     fn test_nested_list() -> Result<()> {
         with_gap(|gap| {
-            let outer_list = gap.eval_rooted("[[1, 2, 3], [4, 5, 6]];")?;
-            assert_eq!(gap.list_len(outer_list.as_element()), 2);
+            let outer_list = gap.eval("[[1, 2, 3], [4, 5, 6]];")?;
+            assert_eq!(gap.list_len(&outer_list), 2);
 
-            let inner_list = gap.root(gap.get_list_elem(outer_list.as_element(), 1)?);
-            assert_eq!(gap.list_len(inner_list.as_element()), 3);
+            let inner_list = gap.list_get(&outer_list, 1)?;
+            assert_eq!(gap.list_len(&inner_list), 3);
 
-            let element = gap.get_list_elem(inner_list.as_element(), 1)?;
-            assert_eq!(gap.integer_usize(&element)?, 5);
-            assert_eq!(gap.elem_string(&element), "5");
+            let element = gap.list_get(&inner_list, 1)?;
+            assert_eq!(gap.to_usize(&element)?, 5);
+            assert_eq!(gap.display(&element), "5");
             Ok(())
         })
     }
@@ -915,8 +1047,8 @@ mod tests {
     #[test]
     fn test_echo() -> Result<()> {
         with_gap(|gap| {
-            let hello = gap.eval_rooted("\"Hello, world!\";")?;
-            assert_eq!(gap.elem_string(hello.as_element()), "Hello, world!");
+            let hello = gap.eval("\"Hello, world!\";")?;
+            assert_eq!(gap.display(&hello), "Hello, world!");
             Ok(())
         })
     }
@@ -925,14 +1057,14 @@ mod tests {
     fn test_smoke_one_plus_one() -> Result<()> {
         with_gap(|gap| {
             let gapdoc = gap.eval("LoadPackage(\"gapdoc\");")?;
-            if !gap.boolean(&gapdoc).unwrap_or(false) {
+            if !gap.to_bool(&gapdoc).unwrap_or(false) {
                 let roots = gap.eval("GAPInfo.RootPaths;")?;
-                let root_paths = gap.elem_string(&roots);
+                let root_paths = gap.display(&roots);
                 panic!("unable to load GAP package gapdoc; GAPInfo.RootPaths = {root_paths}");
             }
 
             let value = gap.eval("1+1;")?;
-            assert_eq!(gap.integer_usize(&value)?, 2);
+            assert_eq!(gap.to_usize(&value)?, 2);
             Ok(())
         })
     }
@@ -941,15 +1073,15 @@ mod tests {
     fn test_list_and_permutation_helpers() -> Result<()> {
         with_gap(|gap| {
             let elements = [gap.int(2), gap.int(4), gap.int(6)];
-            let list = gap.list_rooted(&elements);
-            assert_eq!(gap.list_len(list.as_element()), 3);
+            let list = gap.list(&elements);
+            assert_eq!(gap.list_len(&list), 3);
 
-            let second = gap.get_list_elem(list.as_element(), 1)?;
-            assert_eq!(gap.integer_usize(&second)?, 4);
+            let second = gap.list_get(&list, 1)?;
+            assert_eq!(gap.to_usize(&second)?, 4);
 
-            let permutation = gap.permutation_from_zero_based_images_rooted(&[2, 0, 1])?;
+            let permutation = gap.permutation_from_zero_based_images(&[2, 0, 1])?;
             assert_eq!(
-                gap.permutation_images_zero_based(permutation.as_element(), 3)?,
+                gap.permutation_images_zero_based(&permutation, 3)?,
                 vec![2, 0, 1]
             );
             Ok(())
