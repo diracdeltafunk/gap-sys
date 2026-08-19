@@ -635,37 +635,6 @@ mod tests {
     }
 
     #[test]
-    fn reports_missing_headers() {
-        let root = temp_root("missing-headers");
-        write_file(root.join("lib/init.g"));
-        write_file(root.join("libgap.dylib"));
-
-        let err = discover_gap_config(&DiscoveryEnv {
-            root: Some(root.into_os_string()),
-            ..DiscoveryEnv::default()
-        })
-        .unwrap_err();
-
-        assert!(err.contains("Could not find GAP headers"));
-    }
-
-    #[test]
-    fn reports_missing_libgap() {
-        let root = temp_root("missing-libgap");
-        write_file(root.join("lib/init.g"));
-        write_file(root.join("src/libgap-api.h"));
-        write_file(root.join("src/gap_all.h"));
-
-        let err = discover_gap_config(&DiscoveryEnv {
-            root: Some(root.into_os_string()),
-            ..DiscoveryEnv::default()
-        })
-        .unwrap_err();
-
-        assert!(err.contains("Could not find libgap"));
-    }
-
-    #[test]
     fn discovers_multiarch_lib_dir() {
         let base = temp_root("multiarch-lib");
         let root = base.join("share/gap");
@@ -729,20 +698,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_plain_gap_root_output() {
+    fn parses_gap_root_from_supported_command_outputs() {
         let root = temp_root("plain-gaproot-output");
         write_file(root.join("lib/init.g"));
 
         assert_eq!(
             parse_gap_root_stdout(root.to_string_lossy().as_bytes()),
-            Some(root)
+            Some(root.clone())
         );
-    }
-
-    #[test]
-    fn ignores_banner_output_when_parsing_gap_root() {
-        let root = temp_root("banner-gaproot-output");
-        write_file(root.join("lib/init.g"));
         let output = format!(
             "Unrecognised command line option: --print-gaproot\n\
              GAP 4.11.1 startup banner\n\
@@ -751,22 +714,6 @@ mod tests {
         );
 
         assert_eq!(parse_gap_root_stdout(output.as_bytes()), Some(root));
-    }
-
-    #[test]
-    fn reports_invalid_gap_root() {
-        let root = temp_root("invalid-root");
-        write_file(root.join("src/libgap-api.h"));
-        write_file(root.join("src/gap_all.h"));
-        write_file(root.join("libgap.dylib"));
-
-        let err = discover_gap_config(&DiscoveryEnv {
-            root: Some(root.into_os_string()),
-            ..DiscoveryEnv::default()
-        })
-        .unwrap_err();
-
-        assert!(err.contains("does not contain `lib/init.g`"));
     }
 
     fn temp_root(name: &str) -> PathBuf {

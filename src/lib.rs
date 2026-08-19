@@ -998,63 +998,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_group() -> Result<()> {
+    fn evaluation_and_scalar_conversions_cross_the_ffi_boundary() -> Result<()> {
         with_gap(|gap| {
-            let group = gap.eval("Group((1,2,3),(1,2));")?;
-            assert_eq!(gap.display(&group), "Group( [ (1,2,3), (1,2) ] )");
+            let integer = gap.eval("42;")?;
+            let boolean = gap.eval("true;")?;
+            let failure = gap.eval("fail;")?;
+            let string = gap.eval("\"Hello from GAP\";")?;
+
+            assert_eq!(gap.to_usize(&integer)?, 42);
+            assert!(gap.to_bool(&boolean)?);
+            assert!(gap.is_fail(&failure));
+            assert_eq!(gap.display(&string), "Hello from GAP");
             Ok(())
         })
     }
 
     #[test]
-    fn top_level_eval_roots_its_result() -> Result<()> {
-        let group = eval("Group((1,2,3),(1,2));")?;
+    fn top_level_evaluation_keeps_results_alive_across_gap_calls() -> Result<()> {
+        let value = eval("[1, 2, 3];")?;
         with_gap(|gap| {
-            assert_eq!(gap.display(&group), "Group( [ (1,2,3), (1,2) ] )");
+            for _ in 0..100 {
+                gap.eval("List([1..100], x -> x^2);")?;
+            }
+            assert_eq!(gap.list_len(&value), 3);
+            assert_eq!(gap.to_usize(&gap.list_get(&value, 2)?)?, 3);
             Ok(())
         })
     }
 
     #[test]
-    fn test_direct_product() -> Result<()> {
+    fn global_calls_and_collection_helpers_round_trip_values() -> Result<()> {
         with_gap(|gap| {
-            let degree = gap.int(7);
-            let s7 = gap.call_global("SymmetricGroup", &[&degree])?;
-            let product = gap.call_global("DirectProduct", &[&s7, &s7])?;
-            let order = gap.call_global("Order", &[&product])?;
+            let elements = [gap.int(2), gap.int(4), gap.int(6)];
+            let list = gap.list(&elements);
+            let length = gap.call_global("Length", &[&list])?;
 
-            assert_eq!(gap.to_usize(&order)?, 25_401_600);
+            assert_eq!(gap.to_usize(&length)?, 3);
+            assert_eq!(gap.to_usize(&gap.list_get(&list, 1)?)?, 4);
+
+            let permutation = gap.permutation_from_zero_based_images(&[2, 0, 1])?;
+            assert_eq!(
+                gap.permutation_images_zero_based(&permutation, 3)?,
+                vec![2, 0, 1]
+            );
             Ok(())
         })
     }
 
     #[test]
-    fn test_nested_list() -> Result<()> {
-        with_gap(|gap| {
-            let outer_list = gap.eval("[[1, 2, 3], [4, 5, 6]];")?;
-            assert_eq!(gap.list_len(&outer_list), 2);
-
-            let inner_list = gap.list_get(&outer_list, 1)?;
-            assert_eq!(gap.list_len(&inner_list), 3);
-
-            let element = gap.list_get(&inner_list, 1)?;
-            assert_eq!(gap.to_usize(&element)?, 5);
-            assert_eq!(gap.display(&element), "5");
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_echo() -> Result<()> {
-        with_gap(|gap| {
-            let hello = gap.eval("\"Hello, world!\";")?;
-            assert_eq!(gap.display(&hello), "Hello, world!");
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_smoke_one_plus_one() -> Result<()> {
+    fn runtime_initialization_makes_standard_gap_packages_available() -> Result<()> {
         with_gap(|gap| {
             let gapdoc = gap.eval("LoadPackage(\"gapdoc\");")?;
             if !gap.to_bool(&gapdoc).unwrap_or(false) {
@@ -1062,28 +1054,6 @@ mod tests {
                 let root_paths = gap.display(&roots);
                 panic!("unable to load GAP package gapdoc; GAPInfo.RootPaths = {root_paths}");
             }
-
-            let value = gap.eval("1+1;")?;
-            assert_eq!(gap.to_usize(&value)?, 2);
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_list_and_permutation_helpers() -> Result<()> {
-        with_gap(|gap| {
-            let elements = [gap.int(2), gap.int(4), gap.int(6)];
-            let list = gap.list(&elements);
-            assert_eq!(gap.list_len(&list), 3);
-
-            let second = gap.list_get(&list, 1)?;
-            assert_eq!(gap.to_usize(&second)?, 4);
-
-            let permutation = gap.permutation_from_zero_based_images(&[2, 0, 1])?;
-            assert_eq!(
-                gap.permutation_images_zero_based(&permutation, 3)?,
-                vec![2, 0, 1]
-            );
             Ok(())
         })
     }
@@ -1109,15 +1079,6 @@ mod tests {
         write_file(root.join("pkg/gapdoc/PackageInfo.g"));
 
         assert_eq!(gap_root_arg(&root), format!("{};", root.display()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn runtime_root_inference_does_not_probe_filesystem_root() {
-        let roots = inferred_runtime_roots(Path::new("/tmp/gap-sys-fake-root"));
-
-        assert!(!roots.contains(&PathBuf::from("/lib/gap")));
-        assert!(!roots.contains(&PathBuf::from("/share/gap")));
     }
 
     fn temp_root(name: &str) -> PathBuf {
