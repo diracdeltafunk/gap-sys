@@ -12,6 +12,7 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=gap_config.rs");
+    println!("cargo:rerun-if-changed=wrapper.h.in");
     println!("cargo:rerun-if-env-changed={GAP_SYS_ROOT}");
     println!("cargo:rerun-if-env-changed={GAP_SYS_GAP_BIN}");
     println!("cargo:rerun-if-env-changed={GAP_SYS_INCLUDE_DIRS}");
