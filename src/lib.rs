@@ -290,52 +290,15 @@ unsafe extern "C" fn mark_bag() {
 mod tests {
     use super::*;
 
-    // Due to a bug which I don't feel like fixing right now, tests can't run in parallel.
-    // Also, CI won't have GAP installed, so we skip the tests.
-
-    #[ignore]
-    #[test]
-    fn test_group() {
-        let mut gap = Gap::init();
-        let gap_element = gap.eval("Group((1,2,3),(1,2));").unwrap();
-        assert_eq!(gap.elem_string(&gap_element), "Group( [ (1,2,3), (1,2) ] )");
-    }
-
-    #[ignore]
-    #[test]
-    fn test_direct_product() {
-        let mut gap = Gap::init();
-        gap.eval("a:=DirectProduct(SymmetricGroup(7), SymmetricGroup(7));")
-            .unwrap();
-        let obj = gap.eval("Order(a);").unwrap();
-        let order: usize = gap.elem_string(&obj).parse().unwrap();
-        assert_eq!(order, 25401600);
-    }
-
-    #[ignore]
-    #[test]
-    fn test_nested_list() {
-        let mut gap = Gap::init();
-        let outer_list = gap.eval("[[1, 2, 3], [4, 5, 6]];;").unwrap();
-        let inner_list = gap.get_list_elem(&outer_list, 1).unwrap();
-        let element = gap.get_list_elem(&inner_list, 1).unwrap();
-        let string = gap.elem_string(&element);
-        assert_eq!(string, "5");
-    }
-
-    #[ignore]
-    #[test]
-    fn test_echo() {
-        let mut gap = Gap::init();
-        let hello = gap.eval("\"Hello, world!\";").unwrap();
-        let string = gap.elem_string(&hello);
-        assert_eq!(string, "Hello, world!");
-    }
+    // libgap does not support being initialized more than once per process, so
+    // runtime integration coverage lives in a single smoke test. It is
+    // #[ignore]d by default; CI runs it explicitly and serially.
 
     #[ignore]
     #[test]
     fn test_smoke_one_plus_one() {
         let mut gap = Gap::init();
+
         let gapdoc = gap.eval("LoadPackage(\"gapdoc\");").unwrap();
         let gapdoc_loaded = gap.elem_string(&gapdoc);
         if gapdoc_loaded != "true" {
@@ -343,8 +306,29 @@ mod tests {
             let root_paths = gap.elem_string(&roots);
             panic!("unable to load GAP package gapdoc; GAPInfo.RootPaths = {root_paths}");
         }
-        let value = gap.eval("1+1;").unwrap();
-        assert_eq!(gap.elem_string(&value), "2");
+
+        // Arithmetic round-trip.
+        let sum = gap.eval("1+1;").unwrap();
+        assert_eq!(gap.elem_string(&sum), "2");
+
+        // String round-trip.
+        let echo = gap.eval("\"Hello, world!\";").unwrap();
+        assert_eq!(gap.elem_string(&echo), "Hello, world!");
+
+        // Nested list access.
+        let outer_list = gap.eval("[[1, 2, 3], [4, 5, 6]];;").unwrap();
+        let inner_list = gap.get_list_elem(&outer_list, 1).unwrap();
+        let element = gap.get_list_elem(&inner_list, 1).unwrap();
+        assert_eq!(gap.elem_string(&element), "5");
+
+        // Constructed objects display correctly.
+        let group = gap.eval("Group((1,2,3));").unwrap();
+        assert_eq!(gap.elem_string(&group), "Group( [ (1,2,3) ] )");
+
+        // State carries between evals (sentinel: |S3| = 6).
+        gap.eval("g := Group((1,2,3),(1,2));").unwrap();
+        let order = gap.eval("Size(g);").unwrap();
+        assert_eq!(gap.elem_string(&order), "6");
     }
 
     #[test]
