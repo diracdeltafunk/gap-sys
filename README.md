@@ -49,6 +49,19 @@ copyable handle that may become invalid after a GAP operation that allocates.
 See [MIGRATING.md](MIGRATING.md) for the exact rename map from
 `upstream/master`.
 
+## Threads and errors
+
+The process-global runtime (`gap_sys::global()`, `gap_sys::with_gap`, and
+`gap_sys::eval`) may be used from any thread; a mutex serializes access. The
+guard returned by `global()` is not re-entrant, so do not call `gap_sys::eval`
+or `global()` while holding it. Every wrapper call runs inside libgap's
+`GAP_Enter()`/`GAP_Leave()`, so GAP's garbage collector scans the calling
+thread's stack. GAP errors are returned as `Err` (GAP prints the message to
+its error output) and leave the runtime usable.
+
+GAP releases before 4.11 lack `GAP_Enter()`. With them, GAP may only be used
+from the thread that initialized it; other threads panic.
+
 ## Examples
 
 #### Example showing how to create a Group

@@ -127,7 +127,8 @@ pub fn discover_gap_config(env: &DiscoveryEnv) -> Result<GapConfig, String> {
 /// The wrapper normalizes GAP API differences across releases: callback
 /// signatures, `GAP_Enter` availability, output stream state, function calls,
 /// and bag marking. Keeping those shims in C lets bindgen expose stable Rust
-/// symbols such as `SYSGAP_Initialize` and `SYSGAP_CallFunc2Args`.
+/// symbols such as `SYSGAP_Initialize`, `SYSGAP_Run`, and
+/// `SYSGAP_CallFunc2Args`.
 pub fn wrapper_header(layout: &HeaderLayout) -> String {
     let includes = match layout {
         HeaderLayout::IncludeSubdir => "#include <gap/libgap-api.h>\n#include <gap/gap_all.h>",
@@ -164,15 +165,50 @@ static inline void SYSGAP_Initialize(
 #endif
 }}
 
-#if defined(GAP_Enter)
-static inline int SYSGAP_Enter() {{
-    return GAP_Enter();
-}}
+// Body run by SYSGAP_Run. It receives SYSGAP_Run's opaque data pointer.
+typedef void (*SYSGAP_Body)(void * data);
 
-static inline void SYSGAP_Leave() {{
-    GAP_Leave();
-}}
+// Whether this libgap provides GAP_Enter()/GAP_Leave() (GAP >= 4.11).
+#if defined(GAP_Enter)
+#define SYSGAP_HAS_ENTER 1
+#else
+#define SYSGAP_HAS_ENTER 0
 #endif
+
+// Runs body(data) between GAP_Enter() and GAP_Leave(), returning 1 if body
+// returned normally and 0 if an unhandled GAP error longjmp'd out of it.
+//
+// GAP_Enter() is a macro around setjmp and __builtin_frame_address(0), so it
+// cannot be wrapped in a function that returns before the GAP calls are made:
+// the jump buffer would point into a dead frame, and the recorded stack bottom
+// would lie below the caller's frames. Instead this function stays on the
+// stack for the whole of body. That makes every frame body creates visible to
+// GASMAN's conservative stack scan, whichever thread calls it, and gives
+// unhandled errors a live frame to return to.
+//
+// After such an error, GAP itself restores the recursion depth (in
+// GAP_Error_Postjmp_Returning_); the remaining interpreter state is restored
+// here, exactly as CALL_WITH_CATCH does.
+static inline int SYSGAP_Run(SYSGAP_Body body, void * data) {{
+#if defined(GAP_Enter)
+    volatile Obj currLVars = STATE(CurrLVars);
+    volatile Obj tilde = STATE(Tilde);
+    int ok = GAP_Enter();
+    if (ok) {{
+        body(data);
+    }}
+    else {{
+        SWITCH_TO_OLD_LVARS(currLVars);
+        STATE(Tilde) = tilde;
+        STATE(ThrownObject) = 0;
+    }}
+    GAP_Leave();
+    return ok;
+#else
+    body(data);
+    return 1;
+#endif
+}}
 
 #if defined(GAP_KERNEL_API_VERSION) && GAP_KERNEL_API_VERSION >= 8000
 static TypOutputFile SYSGAP_OUTPUT_STREAM = {{ 0 }};
