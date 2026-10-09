@@ -118,39 +118,58 @@ fn gap_errors_are_reported_and_recovered_from() -> Result<()> {
 #[test]
 fn concurrent_gap_use_from_many_threads_is_safe() -> Result<()> {
     const THREADS: usize = 8;
-    const ITERATIONS: usize = 15;
+    const ITERATIONS: usize = 20;
+    // Groups whose subgroup lattices GAP computes without optional packages
+    // (natural symmetric groups such as `SymmetricGroup(5)` need TransGrp).
+    const GROUPS: [&str; 5] = [
+        "DihedralGroup(IsPermGroup, 16);",
+        "DihedralGroup(IsPermGroup, 24);",
+        "DirectProduct(DihedralGroup(IsPermGroup, 8), CyclicGroup(IsPermGroup, 3));",
+        "WreathProduct(CyclicGroup(IsPermGroup, 3), CyclicGroup(IsPermGroup, 2));",
+        "WreathProduct(CyclicGroup(IsPermGroup, 2), CyclicGroup(IsPermGroup, 3));",
+    ];
+
+    /// The number of conjugacy classes of subgroups of `group` and the sum
+    /// of their representatives' orders, after building the full lattice.
+    fn subgroup_class_summary(group: &str) -> Result<(usize, usize)> {
+        let group = gap_sys::eval(group)?;
+        let gap = gap_sys::global()?;
+        let classes = gap.call_global("ConjugacyClassesSubgroups", &[&group])?;
+        let lattice = gap.call_global("LatticeSubgroups", &[&group])?;
+        let maximal = gap.call_global("MaximalSubgroupsLattice", &[&lattice])?;
+        gap.eval("GASMAN(\"collect\");")?;
+        let representatives = (0..gap.list_len(&classes))
+            .map(|idx| {
+                let class = gap.list_get(&classes, idx)?;
+                gap.call_global("Representative", &[&class])
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let order_sum = representatives
+            .iter()
+            .map(|subgroup| gap.to_usize(&gap.call_global("Size", &[subgroup])?))
+            .sum::<Result<usize>>()?;
+        assert_eq!(gap.list_len(&maximal), gap.list_len(&classes));
+        Ok((representatives.len(), order_sum))
+    }
+
+    let expected = GROUPS
+        .iter()
+        .map(|group| subgroup_class_summary(group))
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(expected[0], (11, 59), "subgroup classes of D_16");
 
     let handles = (0..THREADS)
         .map(|thread_idx| {
+            let expected = expected.clone();
             thread::spawn(move || -> Result<()> {
                 for iteration in 0..ITERATIONS {
-                    let n = 3 + (thread_idx + iteration) % 3;
-                    let group = gap_sys::eval(&format!("SymmetricGroup({n});"))?;
-                    let gap = gap_sys::global()?;
-                    let classes = gap.call_global("ConjugacyClassesSubgroups", &[&group])?;
-                    let lattice = gap.call_global("LatticeSubgroups", &[&group])?;
-                    let maximal = gap.call_global("MaximalSubgroupsLattice", &[&lattice])?;
-                    gap.eval("GASMAN(\"collect\");")?;
-                    let representatives = (0..gap.list_len(&classes))
-                        .map(|idx| {
-                            let class = gap.list_get(&classes, idx)?;
-                            gap.call_global("Representative", &[&class])
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let order: usize = representatives
-                        .iter()
-                        .map(|subgroup| gap.to_usize(&gap.call_global("Size", &[subgroup])?))
-                        .sum::<Result<usize>>()?;
-                    let expected = match n {
-                        3 => 1 + 2 + 3 + 6,
-                        4 => 1 + 2 + 2 + 3 + 4 + 4 + 6 + 8 + 12 + 24 + 4,
-                        _ => 0,
-                    };
-                    if expected != 0 {
-                        assert_eq!(order, expected, "S_{n} class representative orders");
-                    }
-                    assert_eq!(gap.list_len(&maximal), gap.list_len(&classes));
-                    drop(gap);
+                    let idx = (thread_idx + iteration) % GROUPS.len();
+                    let summary = subgroup_class_summary(GROUPS[idx])?;
+                    assert_eq!(
+                        summary, expected[idx],
+                        "subgroup classes of {}",
+                        GROUPS[idx]
+                    );
                     // Give the scheduler a chance to switch threads between
                     // lock acquisitions.
                     thread::yield_now();
